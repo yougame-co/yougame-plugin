@@ -13,11 +13,11 @@ a review link where you press Publish.
 ## Claude Code
 
 ```bash
-claude plugin marketplace add Lrosias/yougame-plugin
+claude plugin marketplace add yougame-co/yougame-plugin
 claude plugin install yougame@yougame
 ```
 
-Or from inside a session: `/plugin marketplace add Lrosias/yougame-plugin` then
+Or from inside a session: `/plugin marketplace add yougame-co/yougame-plugin` then
 `/plugin install yougame@yougame`. That is the whole setup — the plugin brings the MCP
 server with it, and there is nothing to sign up for.
 
@@ -89,7 +89,7 @@ github/           the "Publish to YouGame" GitHub Action: a published release sh
 ```
 
 To ship from GitHub, link the repo on the game's Manage page (GitHub) and use
-`Lrosias/yougame-plugin/github@v1` in a publish job with `id-token: write` (the Manage page
+`yougame-co/yougame-plugin/github@v1` in a publish job with `id-token: write` (the Manage page
 writes the whole workflow). No secret to store:
 https://yougame.co/publish.md#ship-from-github.
 

@@ -203,7 +203,7 @@ scores and the comments stay. Never delete and re-publish a game to update it.
 
 **Shipping every push from GitHub**: when the game lives in a GitHub repo, the creator can link
 it on the game's Manage page (GitHub) and commit the workflow shown there; from then on
-publishing a GitHub release ships the next version through `Lrosias/yougame-plugin/github@v1`
+publishing a GitHub release ships the next version through `yougame-co/yougame-plugin/github@v1`
 (pushes stage previews with a test link), with no key stored (GitHub OIDC,
 `permissions: id-token: write`). Offer it after a first
 publish from a repo; the linking itself is the creator's click. Details: "Ship from GitHub" in
