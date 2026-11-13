@@ -75,9 +75,8 @@ way before publishing. Post finished runs only: a death or a reset is not a time
 including guests. Prepare it before the share click, then call `YouGame.share` with its URL.
 `username` is null for guests: use “I scored…” rather than inventing an account handle.
 On YouGame `YouGame.player.id` is always a per-game id, and `YouGame.player.name` is the
-player's public YouGame name with no prompt, or `"Player"` (online matches too) when they turned
-"Show my name in games" off: the name the game is handed and shows, while their profile stays
-public. `YouGame.requestName()` is optional and resolves at once with `YouGame.player`. In matches, use `room.me`, `room.players[].id` and `world.me`, not
+player's public YouGame name (their gamer tag, online matches too) with no prompt.
+`YouGame.requestName()` is optional and resolves at once with `YouGame.player`. In matches, use `room.me`, `room.players[].id` and `world.me`, not
 `YouGame.player.id`.
 Never gate sharing on login. Optional Sign in buttons call `YouGame.auth.signIn()` to open
 YouGame's sign-in page and return to this game; `YouGame.auth.signedIn` is available after
@@ -289,14 +288,24 @@ read the current Coins section of https://yougame.co/sdk.md before implementing 
 ## Native builds
 
 A game that also ships desktop builds (real Mac, Windows or Linux programs the YouGame desktop
-app runs; publish.md "Desktop builds") gets the whole SDK through a loopback bridge instead of
-`sdk.js`: three environment variables on the game's process (`YOUGAME_BRIDGE`, `YOUGAME_TOKEN`,
-`YOUGAME_GAME`), `POST $YOUGAME_BRIDGE/sdk` with `Authorization: Bearer $YOUGAME_TOKEN` and a
-JSON body whose `type` is the message the web SDK would send (`hello` first, then
-`submitScore`, `leaderboard`, `saveLoad`/`saveWrite`, `saveFileList`/`saveFileRead`/
-`saveFileWrite`/`saveFileDelete`, `charge`, `mpTicket`…), and `GET $YOUGAME_BRIDGE/events` for
-the page's pushes. Read sdk.md "Native builds" for the tables. No variables set means the
+app runs; publish.md "Desktop builds") gets the whole SDK from the app instead of `sdk.js`: each
+request is the message the web SDK would send (`hello` first, then `submitScore`, `leaderboard`,
+`saveLoad`/`saveWrite`, `saveFileList`/`saveFileRead`/`saveFileWrite`/`saveFileDelete`, `charge`,
+`mpTicket`…). A **Windows** build runs in the app's sandbox, which cannot reach a loopback server,
+so it speaks over its stdin and stdout (`YOUGAME_STDIO=1`): one request per line on stdout,
+`yg {"id":1,"type":"hello"}`, answers `yg {"re":1,"ok":true,"result":…}` and pushes
+`yg {"push":…}` on stdin. A **Mac or Linux** build without a `yougame-native.json` talks to a
+loopback bridge (`YOUGAME_BRIDGE`, `YOUGAME_TOKEN`, `YOUGAME_GAME`: `POST $YOUGAME_BRIDGE/sdk`
+with `Authorization: Bearer $YOUGAME_TOKEN`, `GET $YOUGAME_BRIDGE/events` for pushes). Read
+sdk.md "Native builds" for the tables. Neither `YOUGAME_STDIO` nor `YOUGAME_BRIDGE` set means the
 program runs outside YouGame: play without the SDK.
+
+**Online play from a native build** that declares `"net": "yougame"` in `yougame-native.json`
+has no sockets of its own: it asks the app to open YouGame connections over the same stdin and
+stdout (`netOpen` with its `mpTicket` answer's ticket, `netSend`, `netClose`, and `net` pushes),
+only after `hello`'s result shows `netBroker`. For C or C++ use the single header
+`https://yougame.co/native/yougame_net.h`; follow sdk.md "Going online through YouGame" (limits,
+the queue's `matched` step, and what is not available: engine servers and direct links).
 
 **Saves are the step a native build must not skip.** Nothing on the platform can see a native
 game's save folder, so the program syncs its own files with the bridge's `saveFile*` messages,
@@ -340,3 +349,5 @@ of the live SDK reference. Declare categories in root `yougame.json`; use
 `getChallenge()` loads a shared run; createRecorder/createPlayback handle bounded input logs.
 The game handles deterministic simulation or state snapshots and ghost rendering. Never
 mix distinct category runs into the default `gameOver` leaderboard.
+
+A game that only runs as a desktop (Windows/macOS/Linux) build sets `platform: desktop_app` and uploads the desktop build from Manage → Desktop builds. Never ship a web page that tells players to download the desktop app: the listing setting shows that to players.
