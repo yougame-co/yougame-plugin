@@ -42,7 +42,7 @@ friends) the YouGame workflow. Claude Code users get the same thing from the plu
    publish.md). Export into an empty folder and zip that: never a cache or object files.
 6. When the YouGame MCP connection is signed in (it asks for that when it connects; the
    `upload_token` tool then gives a bearer token for the upload) or `YOUGAME_API_KEY` is set
-   (made at https://yougame.co/account → Coding agents): run the plugin's
+   (made at https://yougame.co/account → Your agents → Connect with a key instead): run the plugin's
    `node scripts/upload-build.mjs <build-folder>` with `YOUGAME_UPLOAD_TOKEN` or
    `YOUGAME_API_KEY` set (Node 22+). To change a build you already uploaded, add
    `--from <slug or last uploadId>` so only what changed is sent. Without the plugin download the helper from

@@ -129,7 +129,7 @@ export async function unzipInto(file, into) {
 
 export async function fetchBuildCache(o, env = process.env, fetchImpl = fetch) {
   const key = env.YOUGAME_API_KEY;
-  if (!key) throw new Error("Set YOUGAME_API_KEY to your YouGame key (Account → Coding agents).");
+  if (!key) throw new Error("Set YOUGAME_API_KEY to your YouGame key (Account → Your agents → Connect with a key instead).");
   const url = new URL("/api/native/download/cache", o.site);
   for (const k of ["slug", "platform", "build", "remix"]) if (o[k]) url.searchParams.set(k, o[k]);
   const res = await fetchImpl(url, { headers: { authorization: `Bearer ${key}` } });

@@ -72,7 +72,7 @@ When the MCP connects it asks you to sign in: run `/mcp` in Claude Code, pick **
 and Authenticate; the browser opens YouGame, you press Allow, done. From then on
 `/yougame:publish` finishes with a review link: every field filled in, and the Publish
 button yours. Signed out, it still hands you a zip to drop at https://yougame.co/upload.
-Prefer a key (curl, CI)? Make one at https://yougame.co/account (Coding agents) and
+Prefer a key (curl, CI)? Make one at https://yougame.co/account (Your agents → Connect with a key instead) and
 `export YOUGAME_API_KEY=yg_…` before starting Claude Code for the upload step, and connect
 the MCP with it as the `Authorization: Bearer` header (`claude mcp add --transport http
 yougame https://yougame.co/mcp --header "Authorization: Bearer $YOUGAME_API_KEY"`).

@@ -181,7 +181,7 @@ one short message:
 If the YouGame MCP connection is signed in (the server asks for it when the MCP connects:
 the creator signs in to YouGame in the browser and presses Allow; in Claude Code that is
 `/mcp` → yougame → Authenticate), or `YOUGAME_API_KEY` is set in the environment (a key the
-creator made at https://yougame.co/account → Coding agents), take the submission all the
+creator made at https://yougame.co/account → Your agents → Connect with a key instead), take the submission all the
 way to the creator's final click instead of handing over a zip. Signed in without a key,
 call the `upload_token` tool first: it returns a bearer token good for thirty minutes, and
 that is the token for the upload below (the connection's own token is never shown to you).
