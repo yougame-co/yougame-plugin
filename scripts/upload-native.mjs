@@ -70,6 +70,18 @@ function normalizeZipName(name) {
   while (n.startsWith("./") || n.startsWith(".\\")) n = n.slice(2);
   return n === "." ? "" : n;
 }
+function unsafeZipPath(names) {
+  for (const name of names) {
+    const path = name.replace(/\\/g, "/");
+    if (/[\x00-\x1f]/.test(path)) return name;
+    if (path.startsWith("/") || /^[a-z]:/i.test(path) || path.split("/").includes("..")) return name;
+  }
+  return null;
+}
+var DISK_TWIN = "duplicate ZIP entry on a case-insensitive disk";
+function diskKey(name) {
+  return name.replace(/\\/g, "/").replace(/\/+$/, "").normalize("NFC").toLowerCase();
+}
 async function readRange(file, start, end) {
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > file.size)
     throw notZip();
@@ -84,15 +96,44 @@ function u64(view, off) {
   if (!Number.isSafeInteger(value)) throw notZip();
   return value;
 }
+var OVERRIDING_EXTRAS = /* @__PURE__ */ new Set([28789, 27768]);
 function scanZipExtra(view) {
   let at = 0;
   while (at + 4 <= view.byteLength) {
     const id = view.getUint16(at, true), size = view.getUint16(at + 2, true);
     at += 4;
-    if (at + size > view.byteLength || id === 28789 || id === 1) return false;
+    if (at + size > view.byteLength || OVERRIDING_EXTRAS.has(id) || id === 1) return false;
     at += size;
   }
   return at === view.byteLength;
+}
+function scanLocalExtra(view, descriptor) {
+  let at = 0;
+  let zip64;
+  while (at + 4 <= view.byteLength) {
+    const id = view.getUint16(at, true), size = view.getUint16(at + 2, true);
+    at += 4;
+    if (at + size > view.byteLength || OVERRIDING_EXTRAS.has(id)) return null;
+    if (id === 1) {
+      if (!descriptor || zip64 || size !== 16) return null;
+      zip64 = { bytes: u64(view, at), compressed: u64(view, at + 8) };
+    }
+    at += size;
+  }
+  return at === view.byteLength ? { zip64 } : null;
+}
+function descriptorFits(gap, d) {
+  if (!d) return gap === 0;
+  const base = d.wide ? 20 : 12;
+  return gap === base || gap === base + 4;
+}
+function checkDescriptor(view, d) {
+  const base = d.wide ? 20 : 12;
+  const at = view.byteLength === base + 4 ? 4 : 0;
+  if (at && view.getUint32(0, true) !== 134695760) throw notZip();
+  const compressed = d.wide ? u64(view, at + 4) : view.getUint32(at + 4, true);
+  const bytes = d.wide ? u64(view, at + 12) : view.getUint32(at + 8, true);
+  if (view.getUint32(at, true) !== d.crc || compressed !== d.compressed || bytes !== d.bytes) throw notZip();
 }
 async function listZip(file, maxEntries = 2e4, options = {}) {
   const strict = !!options.strict;
@@ -119,6 +160,19 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
   let cdOffset = tail.getUint32(eocd + 16, true);
   if (strict && (total === 65535 || cdSize === 4294967295 || cdOffset === 4294967295))
     throw notZip();
+  let directoryEnd = tailStart + eocd;
+  if (strict) {
+    const loc = eocd - EOCD64_LOCATOR_LEN;
+    if (loc >= 0 && tail.getUint32(loc, true) === SIG_EOCD64_LOCATOR) {
+      const locAt = tailStart + loc;
+      const recAt = u64(tail, loc + 8);
+      if (tail.getUint32(loc + 4, true) !== 0 || tail.getUint32(loc + 16, true) !== 1 || recAt + 56 !== locAt) throw notZip();
+      const rec = await readRange(file, recAt, locAt);
+      if (rec.getUint32(0, true) !== SIG_EOCD64 || u64(rec, 4) !== 44 || rec.getUint32(16, true) !== 0 || rec.getUint32(20, true) !== 0 || u64(rec, 24) !== total || u64(rec, 32) !== total || u64(rec, 40) !== cdSize || u64(rec, 48) !== cdOffset)
+        throw notZip();
+      directoryEnd = recAt;
+    }
+  }
   if (total === 65535 || cdSize === 4294967295 || cdOffset === 4294967295) {
     const loc = eocd - EOCD64_LOCATOR_LEN;
     if (loc < 0 || tail.getUint32(loc, true) !== SIG_EOCD64_LOCATOR) throw notZip();
@@ -135,11 +189,12 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
   if (total > Math.floor(cdSize / 46)) throw notZip();
   if (options.requireComplete && total > maxEntries)
     throw new ZipReadError("budget", "zip entry count exceeds budget");
-  if (strict && (total > maxEntries || cdSize > 4 * 1024 * 1024 || cdOffset + cdSize !== tailStart + eocd))
+  if (strict && (total > maxEntries || cdSize > 4 * 1024 * 1024 || cdOffset + cdSize !== directoryEnd))
     throw notZip();
   options.directory?.(cdOffset);
   const cd = await readRange(file, cdOffset, cdOffset + cdSize);
   const bytes = new Uint8Array(cd.buffer);
+  options.directoryBytes?.(bytes);
   const decoder = new TextDecoder("utf-8");
   const entries = [];
   const rawNames = [];
@@ -154,7 +209,7 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
     let offset = cd.getUint32(pos + 42, true);
     const method = cd.getUint16(pos + 10, true);
     if (cd.getUint16(pos + 8, true) & 1 || cd.getUint16(pos + 34, true) !== 0) throw notZip();
-    if (strict && ((cd.getUint16(pos + 8, true) & 8265) !== 0 || method !== 0 && method !== 8 || cd.getUint32(pos + 38, true) >>> 28 === 10 || offset >= cdOffset || compressed === 4294967295 || uncompressed === 4294967295))
+    if (strict && ((cd.getUint16(pos + 8, true) & 8257) !== 0 || method !== 0 && method !== 8 || cd.getUint32(pos + 38, true) >>> 28 === 10 || offset >= cdOffset || compressed === 4294967295 || uncompressed === 4294967295))
       throw notZip();
     const nameLen = cd.getUint16(pos + 28, true);
     const extraLen = cd.getUint16(pos + 30, true);
@@ -163,6 +218,7 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
     const extraStart = nameStart + nameLen;
     const next = extraStart + extraLen + commentLen;
     if (next > cd.byteLength) throw notZip();
+    if (strict && commentLen !== 0) throw notZip();
     if (strict && !scanZipExtra(new DataView(cd.buffer, cd.byteOffset + extraStart, extraLen)))
       throw notZip();
     const raw = decoder.decode(bytes.subarray(nameStart, extraStart));
@@ -219,35 +275,145 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
   }
   if (entries.length !== limit) throw notZip();
   if (options.requireComplete && pos !== cdSize) throw notZip();
-  if (renamed) {
-    const seen = /* @__PURE__ */ new Set();
+  if (renamed || strict) {
+    const seen = /* @__PURE__ */ new Set(), disk = /* @__PURE__ */ new Set();
     for (const entry of entries) {
       if (entry.dir && entry.name === "") continue;
-      if (seen.has(entry.name)) throw new ZipReadError("bad-data", "duplicate ZIP entry after removing ./");
+      if (seen.has(entry.name)) throw new ZipReadError("bad-data", "duplicate ZIP entry");
       seen.add(entry.name);
+      if (!strict) continue;
+      const key = diskKey(entry.name);
+      if (disk.has(key)) throw new ZipReadError("bad-data", DISK_TWIN);
+      disk.add(key);
     }
   }
   if (strict) {
     if (entries.length !== total || pos !== cdSize) throw notZip();
+    if (unsafeZipPath(entries.map((entry) => entry.name)) !== null) throw new ZipReadError("bad-data", "unsafe ZIP path");
     const ordered = entries.map((entry, at) => ({ entry, raw: rawNames[at] })).sort((a, b) => a.entry.zip.offset - b.entry.zip.offset);
     const encoder = new TextEncoder();
     if ((ordered[0]?.entry.zip?.offset ?? cdOffset) !== 0) throw notZip();
-    for (let i = 0; i < ordered.length; i++) {
+    const resume = options.localCursor;
+    let dataEnd = resume?.dataEnd ?? 0;
+    let previous = resume?.previous ?? null;
+    for (let i = 0; i < (resume?.next ?? 0); i++) ordered[i].entry.zip.dataOffset = resume.offsets[i];
+    for (let i = resume?.next ?? 0; i < ordered.length; i++) {
       options.checkBudget?.();
       const { entry, raw } = ordered[i], z = entry.zip;
       const next = ordered[i + 1]?.entry.zip?.offset ?? cdOffset;
-      const dataOffset = next - z.compressed;
-      const headerSize = dataOffset - z.offset;
-      if (headerSize < 30 || headerSize > 30 + 2 * 65535) throw notZip();
-      const header = await readRange(file, z.offset, dataOffset);
+      const descriptor = (z.flags & 8) !== 0;
+      const gap = z.offset - dataEnd;
+      if (!descriptorFits(gap, previous)) throw notZip();
+      const headerEnd = next - z.compressed - (descriptor ? 12 : 0);
+      const span = headerEnd - z.offset;
+      if (span < 30 || span > 30 + 2 * 65535 + (descriptor ? 12 : 0)) throw notZip();
+      const range = await readRange(file, dataEnd, headerEnd);
+      if (previous) checkDescriptor(new DataView(range.buffer, range.byteOffset, gap), previous);
+      const header = new DataView(range.buffer, range.byteOffset + gap, span);
       const nameLen = header.getUint16(26, true), extraLen = header.getUint16(28, true);
+      const headerSize = 30 + nameLen + extraLen;
+      if (headerSize > span || !descriptor && headerSize !== span) throw notZip();
       const name = encoder.encode(raw);
-      if (header.getUint32(0, true) !== 67324752 || header.getUint16(6, true) !== z.flags || header.getUint16(8, true) !== z.method || header.getUint32(14, true) !== z.crc || header.getUint32(18, true) !== z.compressed || header.getUint32(22, true) !== entry.bytes || nameLen !== name.length || headerSize !== 30 + nameLen + extraLen || name.some((b, at) => b !== header.getUint8(30 + at)) || !scanZipExtra(new DataView(header.buffer, header.byteOffset + 30 + nameLen, extraLen)))
+      const extra = scanLocalExtra(new DataView(header.buffer, header.byteOffset + 30 + nameLen, extraLen), descriptor);
+      const agree = (local, central) => local === central || descriptor && local === 0;
+      const local32 = { compressed: header.getUint32(18, true), bytes: header.getUint32(22, true) };
+      const sizesAgree = extra?.zip64 ? local32.compressed === 4294967295 && local32.bytes === 4294967295 && agree(extra.zip64.compressed, z.compressed) && agree(extra.zip64.bytes, entry.bytes) : agree(local32.compressed, z.compressed) && agree(local32.bytes, entry.bytes);
+      if (!extra || header.getUint32(0, true) !== 67324752 || header.getUint16(6, true) !== z.flags || header.getUint16(8, true) !== z.method || !agree(header.getUint32(14, true), z.crc) || !sizesAgree || nameLen !== name.length || name.some((b, at) => b !== header.getUint8(30 + at)))
         throw notZip();
-      z.dataOffset = dataOffset;
+      z.dataOffset = z.offset + headerSize;
+      dataEnd = z.dataOffset + z.compressed;
+      previous = descriptor ? { crc: z.crc, compressed: z.compressed, bytes: entry.bytes, wide: !!extra.zip64 } : null;
+      if (resume) {
+        resume.next = i + 1;
+        resume.dataEnd = dataEnd;
+        resume.previous = previous;
+        resume.offsets.push(z.dataOffset);
+        options.localProgress?.();
+      }
+    }
+    if (!resume?.complete) {
+      if (!descriptorFits(cdOffset - dataEnd, previous)) throw notZip();
+      if (previous) checkDescriptor(await readRange(file, dataEnd, cdOffset), previous);
+      if (resume) {
+        resume.complete = true;
+        options.localProgress?.();
+      }
     }
   }
   return renamed ? entries.filter((entry) => !(entry.dir && entry.name === "")) : entries;
+}
+async function readZipEntry(file, entry, maxBytes, checkBudget = () => {
+}) {
+  checkBudget();
+  const { offset, method, compressedBytes } = entry;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || entry.bytes > maxBytes)
+    throw new ZipReadError("budget", "zip entry exceeds byte budget");
+  if (offset === void 0 || compressedBytes === void 0 || method !== 0 && method !== 8 || entry.dir || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !Number.isSafeInteger(compressedBytes) || compressedBytes < 0)
+    throw notZip();
+  const header = await readRange(file, offset, offset + 30);
+  if (header.getUint32(0, true) !== 67324752 || header.getUint16(6, true) & 1 || header.getUint16(8, true) !== method)
+    throw notZip();
+  const start = offset + 30 + header.getUint16(26, true) + header.getUint16(28, true);
+  if (start + compressedBytes > file.size) throw notZip();
+  if (method === 0) {
+    if (compressedBytes !== entry.bytes) throw notZip();
+    return new Uint8Array((await readRange(file, start, start + compressedBytes)).buffer);
+  }
+  let cursor = 0;
+  let rangeError;
+  const input = new ReadableStream(
+    {
+      async pull(controller) {
+        checkBudget();
+        if (cursor === compressedBytes) {
+          controller.close();
+          return;
+        }
+        const end = Math.min(cursor + 64 * 1024, compressedBytes);
+        let chunk;
+        try {
+          chunk = await readRange(file, start + cursor, start + end);
+        } catch (error) {
+          rangeError = error;
+          throw error;
+        }
+        cursor = end;
+        controller.enqueue(new Uint8Array(chunk.buffer));
+      }
+    },
+    { highWaterMark: 0 }
+  );
+  const reader = input.pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      checkBudget();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes)
+        throw new ZipReadError("budget", "inflated zip entry exceeds byte budget");
+      if (length > entry.bytes) throw notZip();
+      chunks.push(value);
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => {
+    });
+    if (error === rangeError) throw error;
+    if (error instanceof TypeError || error instanceof DOMException) throw notZip();
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  if (length !== entry.bytes) throw notZip();
+  const result = new Uint8Array(length);
+  let pos = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, pos);
+    pos += chunk.length;
+  }
+  return result;
 }
 var IGNORE_PREFIX = "__MACOSX/";
 var LINUX_RUNNABLE = /\.(AppImage|x86_64|x64|sh|run)$/i;
@@ -307,6 +473,218 @@ function guessEntry(entries, platform) {
     pick = files.find((f) => LINUX_RUNNABLE.test(f)) ?? files.find((f) => !f.includes("."));
   }
   return pick === void 0 ? null : prefix + pick;
+}
+
+// src/lib/native-launch-spec.ts
+var LAUNCH_SPEC_FILE = "yougame-native.json";
+var DIRECT_UA_TOKEN = "YouGameDirect/1";
+var MOD_PATCH_7Z_UA_TOKEN = "YouGameModPatch7z/1";
+var MOD_AUTHOR_PAGE_UA_TOKEN = "YouGameModAuthorPage/1";
+var EXTERNAL_BUILD_UA_TOKEN = "YouGameExternalBuild/1";
+var STEAM_BASE_UA_TOKEN = "YouGameSteamBase/1";
+var NATIVE_KNOBS_UA_TOKEN = "YouGameNativeKnobs/1";
+var MULTI_DISC_UA_TOKEN = "YouGameMultiDisc/1";
+var MAX_EXTRA_DISCS = 4;
+var DISC_SLOT = /^[a-z][a-z0-9-]{0,15}$/;
+function discSlot(slot) {
+  return typeof slot === "string" && DISC_SLOT.test(slot) && slot !== "base";
+}
+function modPatchSiteOrigins(siteUrl) {
+  return siteUrl === void 0 ? ["https://yougame.co", "https://staging.yougame.co"] : [siteUrl];
+}
+function stagePath(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 260 && !value.includes("..") && /^[A-Za-z0-9 ._\/-]+$/.test(value) && value.split("/").every((part) => !!part.trim() && part !== "." && !/[. ]$/.test(part) && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
+}
+var MOD_PATCH_MAX_BYTES = 2147483648;
+var SHA256 = /^[a-f0-9]{64}$/;
+function modPatchFileName(name) {
+  return name.length <= 128 && !name.includes("..") && !/[^A-Za-z0-9._-]/.test(name) && /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:xdelta|zip|7z|gci)$/.test(name);
+}
+function modPatchOwner(url, sha256, siteUrl) {
+  const hosted = /^https:\/\/(yougame\.co|staging\.yougame\.co)\/api\/native\/mod-patch\/([a-f0-9]{64})\/([^/?#]+)$/.exec(url);
+  if (hosted && hosted[0] === url && hosted[2] === sha256 && modPatchFileName(hosted[3]) && modPatchSiteOrigins(siteUrl).includes(`https://${hosted[1]}`)) return "YouGame";
+  const m = /^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/releases\/download\/([^/?#]+)\/([^/?#]+)$/.exec(url);
+  if (!m) return null;
+  for (const segment of m.slice(1)) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+    if (!decoded || decoded === "." || decoded === ".." || /[\\/\x00-\x20\x7f]/.test(decoded)) return null;
+  }
+  return /^[A-Za-z0-9-]+$/.test(m[1]) && /^[A-Za-z0-9_.-]+$/.test(m[2]) ? m[1] : null;
+}
+function modPatchReleasePage(url) {
+  const m = /^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/releases\/download\/([^/?#]+)\/([^/?#]+)$/.exec(url);
+  return m && modPatchOwner(url) ? `https://github.com/${m[1]}/${m[2]}/releases/tag/${m[3]}` : null;
+}
+function modPatchProblem(raw, siteUrl, userAgent = MOD_AUTHOR_PAGE_UA_TOKEN) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "modPatch must be an object";
+  const p = raw;
+  if (Object.keys(p).some((k) => !["url", "sha256", "kind", "bytes", "name", "outputSha256", "patchSha256", ...userAgent.split(/\s+/).includes(MOD_AUTHOR_PAGE_UA_TOKEN) ? ["from", "page"] : []].includes(k))) return "modPatch has an unknown field";
+  if (typeof p.url !== "string" || p.url.length > 2048 || !modPatchOwner(p.url, p.sha256, siteUrl)) return "modPatch.url must be an https GitHub release asset URL or a matching YouGame mod-patch URL without a query or fragment";
+  if ("from" in p || "page" in p) {
+    if (p.from !== "author_page" || typeof p.page !== "string") return 'modPatch.from "author_page" needs page';
+    const release = modPatchReleasePage(p.url);
+    if (!release || p.page !== release)
+      return "modPatch.page must be the https GitHub releases/tag page of the asset's own release";
+  }
+  if (typeof p.sha256 !== "string" || !SHA256.test(p.sha256)) return "modPatch.sha256 must be 64 lowercase hex characters";
+  if (p.outputSha256 !== void 0 && (typeof p.outputSha256 !== "string" || !SHA256.test(p.outputSha256))) return "modPatch.outputSha256 must be 64 lowercase hex characters";
+  if (!["xdelta", "zip-xdelta", "7z-xdelta", "gci"].includes(p.kind)) return 'modPatch.kind must be "xdelta", "zip-xdelta", "7z-xdelta" or "gci"';
+  if ((p.kind === "xdelta" || p.kind === "zip-xdelta" || p.kind === "7z-xdelta") && p.outputSha256 === void 0) return `modPatch.outputSha256 is required for kind "${p.kind}"`;
+  if (p.patchSha256 !== void 0 && (typeof p.patchSha256 !== "string" || !SHA256.test(p.patchSha256))) return "modPatch.patchSha256 must be 64 lowercase hex characters";
+  if (p.patchSha256 !== void 0 && p.kind !== "zip-xdelta" && p.kind !== "7z-xdelta") return 'modPatch.patchSha256 needs kind "zip-xdelta" or "7z-xdelta"';
+  if (p.kind === "7z-xdelta" && p.patchSha256 === void 0) return 'modPatch.patchSha256 is required for kind "7z-xdelta"';
+  if (typeof p.bytes !== "number" || !Number.isInteger(p.bytes) || p.bytes <= 0 || p.bytes > MOD_PATCH_MAX_BYTES) return `modPatch.bytes must be a positive integer of at most ${MOD_PATCH_MAX_BYTES}`;
+  if (typeof p.name !== "string" || Array.from(p.name).length < 1 || Array.from(p.name).length > 80 || /[^\p{L}\p{M}\p{N}\p{P}\p{S} ]/u.test(p.name) || !p.name.trim()) return "modPatch.name must be 1 to 80 printable characters";
+  return null;
+}
+var PLACEHOLDER = /\{([a-z_]+)(?::([^{}]*))?\}/g;
+var KNOWN = /* @__PURE__ */ new Set(["build", "data", "disc", "base", "mod_file"]);
+var WINDOW_NAME = /^[A-Za-z0-9 ._:-]{1,64}$/;
+function parseLaunchSpec(text, userAgent = "", siteUrl) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { error: `${LAUNCH_SPEC_FILE} is not JSON` };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: `${LAUNCH_SPEC_FILE} must be an object` };
+  const o = raw;
+  const nativeKnobs = userAgent.split(/\s+/).includes(NATIVE_KNOBS_UA_TOKEN);
+  for (const k of Object.keys(o)) if (!["version", "args", "disc", "modPatch", "embed", "controllers", "net", "memoryMb", ...userAgent.split(/\s+/).includes(DIRECT_UA_TOKEN) ? ["direct"] : [], ...userAgent.split(/\s+/).includes(STEAM_BASE_UA_TOKEN) ? ["base", "folders", "children"] : [], ...nativeKnobs ? ["wholeBuild", "appDlls"] : [], ...userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN) ? ["stage", "derived", "licence"] : [], ...userAgent.split(/\s+/).includes(MULTI_DISC_UA_TOKEN) ? ["discs"] : []].includes(k)) return { error: `unknown field "${k}"` };
+  if (o.version !== 1) return { error: "version must be 1" };
+  const args = o.args ?? [];
+  if (!Array.isArray(args) || args.length > 64 || !args.every((a) => typeof a === "string" && a.length <= 1024 && !/[\0\r\n]/.test(a)))
+    return { error: "args must be at most 64 strings of at most 1024 characters" };
+  let discs;
+  if (o.discs !== void 0) {
+    const d = o.discs;
+    if (!d || typeof d !== "object" || Array.isArray(d) || Object.keys(d).length > MAX_EXTRA_DISCS || !Object.entries(d).every(([slot, v]) => discSlot(slot) && (v === true || v === "optional")))
+      return { error: `discs must map at most ${MAX_EXTRA_DISCS} slots (a-z, 0-9, "-", not "base") to true or "optional"` };
+    discs = {};
+    for (const [slot, v] of Object.entries(d)) discs[slot] = v === true ? "required" : "optional";
+  }
+  for (const a of args) {
+    for (const m of a.matchAll(PLACEHOLDER)) {
+      if (m[2] !== void 0) {
+        if (m[1] !== "disc") return { error: `unknown placeholder {${m[1]}:${m[2]}}` };
+        if (!discSlot(m[2])) return { error: `bad disc slot in {disc:${m[2]}}` };
+        if (!discs || !Object.hasOwn(discs, m[2])) return { error: `{disc:${m[2]}} needs "discs": {"${m[2]}": \u2026}` };
+      } else if (!KNOWN.has(m[1])) return { error: `unknown placeholder {${m[1]}}` };
+    }
+    if (a.replace(PLACEHOLDER, "").includes("{")) return { error: `stray "{" in "${a}"` };
+  }
+  const disc = o.disc === true;
+  if (o.disc !== void 0 && typeof o.disc !== "boolean") return { error: "disc must be true or false" };
+  if (!disc && args.some((a) => a.includes("{disc}"))) return { error: '{disc} needs "disc": true' };
+  if (o.modPatch !== void 0) {
+    if (!disc) return { error: 'modPatch needs "disc": true' };
+    const problem = modPatchProblem(o.modPatch, siteUrl, userAgent);
+    if (problem) return { error: problem };
+    if (o.modPatch.kind === "7z-xdelta" && !userAgent.split(/\s+/).includes(MOD_PATCH_7Z_UA_TOKEN))
+      return { error: 'modPatch.kind "7z-xdelta" needs an app with ' + MOD_PATCH_7Z_UA_TOKEN };
+  }
+  if (o.modPatch === void 0 && args.some((a) => a.includes("{mod_file}"))) return { error: "{mod_file} needs modPatch" };
+  if (o.stage !== void 0) {
+    if (!Array.isArray(o.stage) || o.stage.length > 16) return { error: "stage must be at most 16 operations" };
+    const targets = [];
+    let roms = 0;
+    for (const op of o.stage) {
+      if (!op || typeof op !== "object" || Array.isArray(op)) return { error: "invalid stage operation" };
+      const keys = Object.keys(op).sort().join(",");
+      if (keys === "rom") {
+        if (!stagePath(op.rom) || op.rom.includes("/") || !op.rom.endsWith(".z64") || ++roms > 1) return { error: "stage.rom must name one .z64 file" };
+      } else if (keys === "copy,to") {
+        if (!stagePath(op.copy) || !stagePath(op.to)) return { error: "stage.copy and to must be safe relative paths" };
+      } else if (keys === "touch") {
+        if (!stagePath(op.touch)) return { error: "stage.touch must be a safe relative path" };
+      } else return { error: "invalid stage operation" };
+      const target = (op.rom ?? op.to ?? op.touch).toLowerCase();
+      if (targets.some((t) => t === target || t.startsWith(target + "/") || target.startsWith(t + "/"))) return { error: "stage targets overlap" };
+      targets.push(target);
+    }
+  }
+  if (o.derived !== void 0 && (!Array.isArray(o.derived) || o.derived.length > 64 || !o.derived.every((name) => stagePath(name) && !name.includes("/") && /\.(otr|o2r)$/i.test(name)) || new Set(o.derived.map((name) => name.toLowerCase())).size !== o.derived.length))
+    return { error: "derived must be at most 64 unique top-level .otr or .o2r names" };
+  if (o.licence !== void 0) {
+    const l = o.licence;
+    if (!l || typeof l !== "object" || Array.isArray(l) || Object.keys(l).sort().join(",") !== "approved_at,approved_by,spdx,tag" || ![l.spdx, l.tag, l.approved_by, l.approved_at].every((v) => typeof v === "string" && v.trim() && v.length <= 300 && !/[\x00-\x1f\x7f]/.test(v)) || !Number.isFinite(Date.parse(l.approved_at))) return { error: "licence needs SPDX, tag and a recorded reviewer and approval time" };
+  }
+  let base = null;
+  if (o.base !== void 0) {
+    const b = o.base;
+    if (!b || typeof b !== "object" || Array.isArray(b) || Object.keys(b).some((k) => !["steam", "buildids", "files", "name", "hashes"].includes(k)))
+      return { error: "base must be an object with steam, buildids and files" };
+    if (typeof b.steam !== "number" || !Number.isInteger(b.steam) || b.steam < 1 || b.steam > 2147483647)
+      return { error: "base.steam must be a whole app id from 1 to 2147483647" };
+    const buildids = b.buildids === void 0 ? [] : b.buildids;
+    if (!Array.isArray(buildids) || buildids.length > 16 || !buildids.every((id) => typeof id === "string" && /^\d{1,12}$/.test(id)))
+      return { error: "base.buildids must be at most 16 strings of 1 to 12 digits" };
+    const files = b.files === void 0 ? [] : b.files;
+    if (!Array.isArray(files) || files.length > 32 || !files.every((file) => typeof file === "string" && file.length > 0 && file.length <= 260 && !file.includes("..") && !/[\\:\0-\x1f\x7f]/.test(file) && file.split("/").every((part) => part !== "" && part !== "." && part !== "..")))
+      return { error: "base.files must be at most 32 safe relative paths using forward slashes, each at most 260 characters" };
+    if (b.name !== void 0 && (typeof b.name !== "string" || Array.from(b.name).length < 1 || Array.from(b.name).length > 80 || /[^\p{L}\p{M}\p{N}\p{P}\p{S} ]/u.test(b.name) || !b.name.trim()))
+      return { error: "base.name must be 1 to 80 printable characters" };
+    if (b.hashes !== void 0) {
+      if (!b.hashes || typeof b.hashes !== "object" || Array.isArray(b.hashes) || !Object.entries(b.hashes).every(([file, hashes]) => files.includes(file) && Array.isArray(hashes) && hashes.length <= 16 && hashes.every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash))))
+        return { error: "base.hashes must map base.files paths to at most 16 SHA-256 strings" };
+    }
+    base = { steam: b.steam, buildids, files, ...b.name !== void 0 ? { name: b.name } : {}, ...b.hashes !== void 0 ? { hashes: b.hashes } : {} };
+  }
+  if (!base && args.some((a) => a.includes("{base}"))) return { error: "{base} needs base" };
+  if (o.folders !== void 0 && (!Array.isArray(o.folders) || o.folders.length > 4 || !o.folders.every((folder) => typeof folder === "string" && /^(documents|localappdata)\/[A-Za-z0-9 ._-]{1,64}(\/[A-Za-z0-9 ._-]{1,64}){0,2}$/.test(folder) && folder.split("/").slice(1).every((part) => !part.includes("..") && part.trim() === part && !part.endsWith(".") && part !== "." && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(part)))))
+    return { error: "folders must be at most 4 documents/ or localappdata/ paths with 1 to 3 plain segments" };
+  if (o.children !== void 0 && o.children !== 1 && o.children !== 2) return { error: "children must be an integer from 1 to 2" };
+  if (o.children !== void 0 && !base) return { error: "children needs base" };
+  if (o.wholeBuild !== void 0 && o.wholeBuild !== true) return { error: "wholeBuild must be true" };
+  if (o.appDlls !== void 0 && o.appDlls !== true) return { error: "appDlls must be true" };
+  let embed = null;
+  if (o.embed !== void 0) {
+    const e = o.embed;
+    if (!e || typeof e !== "object" || typeof e.class !== "string" || typeof e.title !== "string" || !WINDOW_NAME.test(e.class) || !WINDOW_NAME.test(e.title) || (e.class.includes(":") || e.title.includes(":")) && !userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN))
+      return { error: "embed needs a window class and title (letters, digits, space . _ -)" };
+    embed = { cls: e.class, title: e.title };
+  }
+  if (o.controllers !== void 0 && o.controllers !== "mirror" && o.controllers !== "none") return { error: 'controllers must be "mirror" or "none"' };
+  if (o.net !== void 0 && o.net !== "internet" && o.net !== "yougame" && o.net !== "none") return { error: 'net must be "none", "yougame" or "internet"' };
+  if (o.direct !== void 0 && o.direct !== true) return { error: "direct must be true" };
+  if (o.direct === true && o.net !== "yougame") return { error: 'direct needs net "yougame"' };
+  const memoryMb = o.memoryMb === void 0 ? 4096 : o.memoryMb;
+  if (typeof memoryMb !== "number" || !Number.isInteger(memoryMb) || memoryMb < 512 || memoryMb > 16384) return { error: "memoryMb must be a whole number from 512 to 16384" };
+  return { spec: { args, disc, ...o.derived !== void 0 ? { derived: o.derived } : {}, ...o.licence !== void 0 ? { licence: o.licence } : {}, ...o.stage !== void 0 ? { stage: o.stage } : {}, ...o.modPatch !== void 0 ? { modPatch: o.modPatch } : {}, base, ...o.folders !== void 0 ? { folders: o.folders } : {}, ...o.children !== void 0 ? { children: o.children } : {}, ...o.wholeBuild === true ? { wholeBuild: true } : {}, ...o.appDlls === true ? { appDlls: true } : {}, embed, controllers: o.controllers === "mirror" ? "mirror" : "none", net: o.net === "internet" || o.net === "yougame" ? o.net : "none", ...o.direct === true ? { direct: true } : {}, memoryMb, ...discs && Object.keys(discs).length ? { discs } : {} } };
+}
+var APP_PARSE_TOKENS = `${DIRECT_UA_TOKEN} ${STEAM_BASE_UA_TOKEN} ${NATIVE_KNOBS_UA_TOKEN} ${MOD_PATCH_7Z_UA_TOKEN} ${MOD_AUTHOR_PAGE_UA_TOKEN} ${EXTERNAL_BUILD_UA_TOKEN} ${MULTI_DISC_UA_TOKEN}`;
+
+// src/lib/native-spec-check.ts
+function specNameFor(entry) {
+  const slash = entry.lastIndexOf("/");
+  return slash < 0 ? LAUNCH_SPEC_FILE : `${entry.slice(0, slash + 1)}${LAUNCH_SPEC_FILE}`;
+}
+function checkNativeSpec(text, name = LAUNCH_SPEC_FILE) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    raw = void 0;
+  }
+  const o = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+  if (o && o.version !== 1)
+    return {
+      refuse: `${name} ${o.version === void 0 ? "has no version" : `has "version": ${JSON.stringify(o.version)}`}, so the desktop app refuses it at Play. Fix: add "version": 1.`
+    };
+  const warnings = [];
+  const parsed = parseLaunchSpec(text, APP_PARSE_TOKENS);
+  if ("error" in parsed)
+    warnings.push(`Warning: the desktop app will refuse ${name} at Play: ${parsed.error}.`);
+  if (o && o.net === void 0)
+    warnings.push(
+      `Warning: ${name} has no "net", so the game runs offline (no network at all). Add "net": "yougame" for YouGame's online features, or "net": "internet" if it talks to its own servers.`
+    );
+  return { warnings };
 }
 
 // src/lib/source-git.ts
@@ -381,6 +759,8 @@ var SITE_BRAND = SITE_STAGE ? `${SITE_NAME} ${SITE_STAGE}` : SITE_NAME;
 var MB = 1024 * 1024;
 var MAX_UPLOAD_BYTES = 5 * 1024 * MB;
 var MAX_FILE_BYTES = 100 * MB;
+var MAX_BUILD_FILE_BYTES = 512 * MB;
+var UPLOAD_PART_BYTES = 64 * MB;
 var MAX_THUMB_BYTES = 8 * MB;
 var MAX_SHOT_BYTES = 8 * MB;
 var MAX_VIDEO_BYTES = 100 * MB;
@@ -436,8 +816,10 @@ var MAX_FOLDER_FILE_BYTES = 1.5 * 1024 ** 3;
 var FOLDER_LIMIT_MESSAGE = "Folder uploads allow at most 1 GB total and 1.5 GB per file. Zip the build first and pass the .zip instead.";
 async function archive(path) {
   const target = await lstat(path);
-  if (target.isFile() && /\.zip$/i.test(path)) return { file: await openAsBlob(path), filename: basename(path) };
-  if (!target.isDirectory()) throw new Error("Pass a .zip or a built Windows folder. For Unreal, use a Shipping build.");
+  if (target.isFile() && /\.zip$/i.test(path))
+    return { file: await openAsBlob(path), filename: basename(path) };
+  if (!target.isDirectory())
+    throw new Error("Pass a .zip or a built folder. For Unreal, use a Shipping build.");
   const files = /* @__PURE__ */ new Map();
   const paths = /* @__PURE__ */ new Map();
   let size = 22, total = 0;
@@ -445,16 +827,19 @@ async function archive(path) {
     for (const entry of await readdir(join(path, relative), { withFileTypes: true })) {
       if (IGNORED_ENTRY.test(entry.name)) continue;
       const name = relative ? `${relative}/${entry.name}` : entry.name;
-      if (entry.isSymbolicLink() || !safeSourcePath(name)) throw new Error(`Unsafe build path: ${name}`);
+      if (entry.isSymbolicLink() || !safeSourcePath(name))
+        throw new Error(`Unsafe build path: ${name}`);
       if (entry.isDirectory()) await walk(name);
       else if (entry.isFile()) {
-        if (paths.size >= 2e4) throw new Error("Native builds are capped at 20000 files.");
+        if (paths.size >= 2e4) throw new Error("Desktop builds are capped at 20000 files.");
         const local = join(path, name);
         const bytes = (await lstat(local)).size;
         total += bytes;
-        if (bytes > MAX_FOLDER_FILE_BYTES || total > MAX_FOLDER_BYTES) throw new Error(FOLDER_LIMIT_MESSAGE);
+        if (bytes > MAX_FOLDER_FILE_BYTES || total > MAX_FOLDER_BYTES)
+          throw new Error(FOLDER_LIMIT_MESSAGE);
         size += bytes + 76 + 2 * Buffer.byteLength(name);
-        if (size > 4294967295) throw new Error("Folder zip exceeds ZIP32; supply a .zip of at most 4 GB.");
+        if (size > 4294967295)
+          throw new Error("Folder zip exceeds ZIP32; supply a .zip of at most 4 GB.");
         paths.set(name, { local, bytes });
       } else throw new Error(`Not a regular build file: ${name}`);
     }
@@ -462,10 +847,12 @@ async function archive(path) {
   await walk();
   for (const [name, { local, bytes }] of paths) {
     const file = await openAsBlob(local);
-    if (file.size !== bytes) throw new Error("The build folder changed. Zip the build first and try again.");
+    if (file.size !== bytes)
+      throw new Error("The build folder changed. Zip the build first and try again.");
     files.set(name, Buffer.from(await file.arrayBuffer()));
   }
-  if (sourceZipSize(files) > 4294967295) throw new Error("Folder zip exceeds ZIP32; supply a .zip of at most 4 GB.");
+  if (sourceZipSize(files) > 4294967295)
+    throw new Error("Folder zip exceeds ZIP32; supply a .zip of at most 4 GB.");
   return { file: new Blob([...sourceZipChunks(files)]), filename: `${basename(path)}.zip` };
 }
 var PLATFORM_NAMES = { windows: "Windows", linux: "Linux", macos: "Mac" };
@@ -483,11 +870,14 @@ async function sendInOrder(count, limit, read, send) {
       failed ??= error;
       break;
     }
-    const sent = send(i, item).then((done) => {
-      results[i] = done;
-    }, (error) => {
-      failed ??= error;
-    }).finally(() => inflight.delete(sent));
+    const sent = send(i, item).then(
+      (done) => {
+        results[i] = done;
+      },
+      (error) => {
+        failed ??= error;
+      }
+    ).finally(() => inflight.delete(sent));
     inflight.add(sent);
   }
   await Promise.all(inflight);
@@ -509,37 +899,76 @@ async function uploadNative(input, {
   site = process.env.YOUGAME_URL || "https://yougame.co",
   token = teamBranch !== void 0 ? process.env.YOUGAME_API_KEY || process.env.YOUGAME_NATIVE_TOKEN : process.env.YOUGAME_NATIVE_TOKEN,
   fetch: request = fetch,
-  sleep = delay
+  sleep = delay,
+  warn = (message) => console.warn(message)
 } = {}) {
-  if (!token) throw new Error(teamBranch !== void 0 ? "Set YOUGAME_API_KEY (a full key) to upload a team branch or proposed build." : "Set YOUGAME_NATIVE_TOKEN from native_upload_token. YOUGAME_API_KEY is accepted only with --team-branch.");
+  if (!token)
+    throw new Error(
+      teamBranch !== void 0 ? "Set YOUGAME_API_KEY (a full key) to upload a team branch or proposed build." : "Set YOUGAME_NATIVE_TOKEN from native_upload_token. YOUGAME_API_KEY is accepted only with --team-branch."
+    );
   if (!slug) throw new Error("Pass --slug for the listing.");
-  if (!Object.hasOwn(PLATFORM_NAMES, platform)) throw new Error("Pick --platform windows, linux or macos.");
-  if (platform !== "windows" && teamBranch === void 0) throw new Error("Mac and Linux builds upload only to a team branch; pass --team-branch.");
-  if (!["x64", "arm64", "universal"].includes(arch)) throw new Error("Pick x64, arm64 or universal.");
+  if (!Object.hasOwn(PLATFORM_NAMES, platform))
+    throw new Error("Pick --platform windows, linux or macos.");
+  if (!["x64", "arm64", "universal"].includes(arch))
+    throw new Error("Pick x64, arm64 or universal.");
   if (teamBranch !== void 0 && (typeof teamBranch !== "string" || teamBranch.trim().length < 3 || teamBranch.trim().length > 60))
     throw new Error("Name the team branch with 3\u201360 characters.");
-  if (sourceUrl === void 0 !== (sourceCommit === void 0)) throw new Error("Pass --source-url and --source-commit together.");
-  if ((sourceUrl !== void 0 || source !== void 0) && teamBranch === void 0) throw new Error("--source, --source-url and --source-commit go with --team-branch.");
-  if (version !== void 0 && teamBranch === void 0) throw new Error("--version goes with --team-branch.");
-  if (version !== void 0 && !NATIVE_VERSION_RE.test(version)) throw new Error("--version takes letters, digits and . + _ - (up to 40).");
-  if (from !== void 0 && (!reuse || !/^[0-9a-f-]{36}$/i.test(String(from)))) throw new Error("--from takes an earlier build's id, without --no-reuse.");
+  if (sourceUrl === void 0 !== (sourceCommit === void 0))
+    throw new Error("Pass --source-url and --source-commit together.");
+  if ((sourceUrl !== void 0 || source !== void 0) && teamBranch === void 0)
+    throw new Error("--source, --source-url and --source-commit go with --team-branch.");
+  if (version !== void 0 && teamBranch === void 0)
+    throw new Error("--version goes with --team-branch.");
+  if (version !== void 0 && !NATIVE_VERSION_RE.test(version))
+    throw new Error("--version takes letters, digits and . + _ - (up to 40).");
+  if (from !== void 0 && (!reuse || !/^[0-9a-f-]{36}$/i.test(String(from))))
+    throw new Error("--from takes an earlier build's id, without --no-reuse.");
   let sourceFile = null;
   if (source !== void 0) {
-    if (!/\.(?:tar\.gz|tgz)$/i.test(String(source))) throw new Error("--source takes a .tar.gz of the build's complete source.");
+    if (!/\.(?:tar\.gz|tgz)$/i.test(String(source)))
+      throw new Error("--source takes a .tar.gz of the build's complete source.");
     const target = await lstat(resolve(source));
     if (!target.isFile()) throw new Error("--source takes a .tar.gz file.");
     sourceFile = await openAsBlob(resolve(source));
-    if (sourceFile.size < 1 || sourceFile.size > 200 * 1024 ** 2) throw new Error("Source archives for proposed builds are at most 200 MB.");
+    if (sourceFile.size < 1 || sourceFile.size > 200 * 1024 ** 2)
+      throw new Error("Source archives for proposed builds are at most 200 MB.");
   }
   const base = new URL(site);
-  if (base.username || base.password || base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname))) throw new Error("Use HTTPS, or localhost for development.");
+  if (base.username || base.password || base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname)))
+    throw new Error("Use HTTPS, or localhost for development.");
   const path = resolve(input);
   const { file, filename } = await archive(path);
-  if (file.size < 1024 || file.size > 4 * 1024 ** 3) throw new Error("Native build zips must be between 1 KB and 4 GB.");
+  if (file.size < 1024 || file.size > 4 * 1024 ** 3)
+    throw new Error("Desktop build zips must be between 1 KB and 4 GB.");
   const entries = await listZip(file, 2e4, { requireComplete: true, locators: true });
   entry = entry == null ? guessEntry(entries, platform) : normalizeZipName(String(entry));
   const present = platform === "macos" && /\.app$/i.test(entry ?? "") ? entries.some((e) => e.name.startsWith(`${entry}/`)) : entries.some((e) => !e.dir && e.name === entry);
-  if (!entry || !present || entry.includes("..") || entry.startsWith("/")) throw new Error(`Could not find the ${PLATFORM_NAMES[platform]} entry; pass --entry with its path inside the zip.`);
+  if (!entry || !present || entry.includes("..") || entry.startsWith("/"))
+    throw new Error(
+      `Could not find the ${PLATFORM_NAMES[platform]} entry; pass --entry with its path inside the zip.`
+    );
+  const specName = specNameFor(entry), spec = entries.find((e) => !e.dir && e.name === specName);
+  if (platform === "linux" && entry.includes("/"))
+    throw new Error(
+      `Put the Linux program (${entry}) and yougame-native.json at the top of the zip, then run this again.`
+    );
+  if (!spec && platform === "linux" && teamBranch === void 0)
+    throw new Error(
+      `Add ${specName} beside ${entry} so the app can run it in its Linux sandbox, e.g. {"version": 1, "net": "internet"} (sdk.md lists every key), then run this again.`
+    );
+  if (spec) {
+    const text = await readZipEntry(file, spec, 64 * 1024).then(
+      (bytes) => new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes),
+      () => null
+    );
+    const checked = text === null ? {
+      warnings: [
+        `Warning: could not check ${specName}: it is not a readable file of at most 64 KB.`
+      ]
+    } : checkNativeSpec(text, specName);
+    if ("refuse" in checked) throw new Error(checked.refuse);
+    for (const warning of checked.warnings) warn(warning);
+  }
   const headers = { authorization: `Bearer ${token}` };
   async function json(route, body) {
     const response = await request(new URL(`/api/native/upload/${route}`, base), {
@@ -573,10 +1002,17 @@ async function uploadNative(input, {
     const local = [];
     for (const e of entries) {
       const z = e.zip, o = old.get(e.name);
-      if (e.dir || !z || z.compressed < REUSE_MIN_ENTRY || !o || o.c !== z.crc || o.z !== z.compressed || o.m !== z.method) continue;
+      if (e.dir || !z || z.compressed < REUSE_MIN_ENTRY || !o || o.c !== z.crc || o.z !== z.compressed || o.m !== z.method)
+        continue;
       const header = Buffer.from(await file.slice(z.offset, z.offset + 30).arrayBuffer());
       if (header.length !== 30 || header.readUInt32LE(0) !== 67324752) continue;
-      local.push({ name: e.name, crc: z.crc, compressed: z.compressed, method: z.method, dataOffset: z.offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28) });
+      local.push({
+        name: e.name,
+        crc: z.crc,
+        compressed: z.compressed,
+        method: z.method,
+        dataOffset: z.offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28)
+      });
     }
     runs = copyRuns(local, listing);
   }
@@ -584,7 +1020,12 @@ async function uploadNative(input, {
     const hash = createHash("sha256");
     const sendPart = async (part, offset, end, bytes) => {
       const url = new URL("/api/native/upload/part", base);
-      url.search = new URLSearchParams({ build: start.build.id, upload: uploadId, part: String(part), ...object ? { object } : {} }).toString();
+      url.search = new URLSearchParams({
+        build: start.build.id,
+        upload: uploadId,
+        part: String(part),
+        ...object ? { object } : {}
+      }).toString();
       const segments = !object && runs.length ? partSegments(runs, offset, end) : [];
       let reused = null;
       if (segments.some((s) => s.kind === "c")) {
@@ -597,17 +1038,28 @@ async function uploadNative(input, {
         }
         const reuseUrl = new URL(url);
         reuseUrl.searchParams.set("from", listing.from);
-        reused = { url: reuseUrl, body: Buffer.concat(raw), segments: formatSegments(segments), copied, sha: createHash("sha256").update(bytes).digest("hex") };
+        reused = {
+          url: reuseUrl,
+          body: Buffer.concat(raw),
+          segments: formatSegments(segments),
+          copied,
+          sha: createHash("sha256").update(bytes).digest("hex")
+        };
       }
       for (let attempt = 1; ; attempt++) {
         try {
           const send = reused ?? { url, body: bytes };
-          const response = await request(send.url, { method: "PUT", headers: {
-            ...headers,
-            "content-type": "application/octet-stream",
-            "content-length": String(send.body.length),
-            ...reused ? { [SEGMENTS_HEADER]: reused.segments, [PART_SHA_HEADER]: reused.sha } : {}
-          }, body: send.body, redirect: "error" });
+          const response = await request(send.url, {
+            method: "PUT",
+            headers: {
+              ...headers,
+              "content-type": "application/octet-stream",
+              "content-length": String(send.body.length),
+              ...reused ? { [SEGMENTS_HEADER]: reused.segments, [PART_SHA_HEADER]: reused.sha } : {}
+            },
+            body: send.body,
+            redirect: "error"
+          });
           const result = await response.json();
           if (reused && typeof result.code === "string" && result.code.startsWith("reuse_")) {
             if (result.code === "reuse_mismatch" && ++mismatches >= REUSE_MAX_MISMATCHES) runs = [];
@@ -617,7 +1069,8 @@ async function uploadNative(input, {
             continue;
           }
           if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-          if (result.partNumber !== part || typeof result.etag !== "string") throw new Error("Invalid uploaded part.");
+          if (result.partNumber !== part || typeof result.etag !== "string")
+            throw new Error("Invalid uploaded part.");
           if (reused) {
             reusedBytes += reused.copied;
             refusals = 0;
@@ -635,22 +1088,43 @@ async function uploadNative(input, {
       }
     };
     const count = Math.ceil(blob.size / start.partBytes);
-    const parts = await sendInOrder(count, PARALLEL_PARTS, async (i) => {
-      const offset = i * start.partBytes, end = Math.min(blob.size, offset + start.partBytes);
-      const bytes = Buffer.from(await blob.slice(offset, end).arrayBuffer());
-      hash.update(bytes);
-      return { offset, end, bytes };
-    }, (i, { offset, end, bytes }) => sendPart(i + 1, offset, end, bytes));
+    const parts = await sendInOrder(
+      count,
+      PARALLEL_PARTS,
+      async (i) => {
+        const offset = i * start.partBytes, end = Math.min(blob.size, offset + start.partBytes);
+        const bytes = Buffer.from(await blob.slice(offset, end).arrayBuffer());
+        hash.update(bytes);
+        return { offset, end, bytes };
+      },
+      (i, { offset, end, bytes }) => sendPart(i + 1, offset, end, bytes)
+    );
     return { parts, sha256: hash.digest("hex") };
   }
   try {
-    if (!start.build?.id || !start.uploadId || start.partBytes !== 64 * 1024 ** 2) throw new Error("Unexpected native upload parameters.");
-    if (sourceFile && typeof start.sourceUploadId !== "string") throw new Error("Unexpected native upload parameters.");
+    if (!start.build?.id || !start.uploadId || start.partBytes !== 64 * 1024 ** 2)
+      throw new Error("Unexpected native upload parameters.");
+    if (sourceFile && typeof start.sourceUploadId !== "string")
+      throw new Error("Unexpected native upload parameters.");
     const { parts, sha256 } = await uploadParts(file, start.uploadId);
-    const sourceUpload = sourceFile ? { uploadId: start.sourceUploadId, ...await uploadParts(sourceFile, start.sourceUploadId, "source") } : null;
-    const result = await json("complete", { build: start.build.id, uploadId: start.uploadId, parts, sha256, ...sourceUpload ? { source: sourceUpload } : {} });
+    const sourceUpload = sourceFile ? {
+      uploadId: start.sourceUploadId,
+      ...await uploadParts(sourceFile, start.sourceUploadId, "source")
+    } : null;
+    const result = await json("complete", {
+      build: start.build.id,
+      uploadId: start.uploadId,
+      parts,
+      sha256,
+      ...sourceUpload ? { source: sourceUpload } : {}
+    });
     const note = typeof start.note === "string" ? `. ${start.note}` : "";
-    return { id: result.build.id, ...reusedBytes ? { reusedBytes, bytes: file.size } : {}, ...fromRefused ? { fromRefused: true } : {}, message: teamBranch !== void 0 ? `ready on the team branch "${teamBranch.trim()}"${note}` : start.requestBranch === true ? start.requestVisible === false ? "uploaded as a test build, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change" : "ready as a test build: signed-in players can try it now. The live game doesn't change until its owner accepts it" : "waiting for you on Manage \u2192 Native builds" };
+    return {
+      id: result.build.id,
+      ...reusedBytes ? { reusedBytes, bytes: file.size } : {},
+      ...fromRefused ? { fromRefused: true } : {},
+      message: teamBranch !== void 0 ? `ready on the team branch "${teamBranch.trim()}"${note}` : start.requestBranch === true ? start.requestVisible === false ? "uploaded as a test build, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change" : "ready as a test build: signed-in players can try it now. The live game doesn't change until its owner accepts it" : "waiting for you on Manage \u2192 Desktop builds"
+    };
   } catch (error) {
     await json("abort", { build: start.build?.id, uploadId: start.uploadId }).catch(() => {
     });
@@ -678,13 +1152,25 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       if (args[i] === "--no-reuse") options.reuse = false;
       else if (flag && args[i + 1] && !args[i + 1].startsWith("--")) options[flag] = args[++i];
       else if (!args[i].startsWith("--") && !input) input = args[i];
-      else throw new Error("Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] <build.zip | build-folder>");
+      else
+        throw new Error(
+          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] <build.zip | build-folder>"
+        );
     }
-    if (!input) throw new Error("Pass a build.zip or folder and --slug. For Unreal, upload a Shipping build.");
+    if (!input)
+      throw new Error(
+        "Pass a build.zip or folder and --slug. For Unreal, upload a Shipping build."
+      );
     const result = await uploadNative(input, options);
     console.log(`${result.id}: ${result.message}`);
-    if (result.fromRefused) console.log("Reuse of the earlier build you named wasn't available this time, so every byte was sent.");
-    if (result.reusedBytes) console.log(`Reused ${(result.reusedBytes / 1024 ** 2).toFixed(1)} MB of ${(result.bytes / 1024 ** 2).toFixed(1)} MB from an earlier build; sent the rest.`);
+    if (result.fromRefused)
+      console.log(
+        "Reuse of the earlier build you named wasn't available this time, so every byte was sent."
+      );
+    if (result.reusedBytes)
+      console.log(
+        `Reused ${(result.reusedBytes / 1024 ** 2).toFixed(1)} MB of ${(result.bytes / 1024 ** 2).toFixed(1)} MB from an earlier build; sent the rest.`
+      );
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

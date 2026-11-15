@@ -12,12 +12,15 @@ var init_supabase = __esm({
 
 // scripts/upload-build.mjs
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { readdir, stat, readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { readdir, stat, readFile, writeFile, mkdtemp, mkdir, open, rm } from "node:fs/promises";
 import { basename, dirname, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import * as zlib from "node:zlib";
 
 // src/lib/desktop-handoff.ts
 var APP_SCHEME = process.env.NEXT_PUBLIC_SITE_URL === "https://staging.yougame.co" ? "yougame-staging" : "yougame";
@@ -46,6 +49,57 @@ var MAX_BASE_FILE_BYTES = 128 * 1024 * 1024;
 var MAX_DISC_BYTES = 9 * 1024 * 1024 * 1024;
 var BASE_DATA_EXTENSIONS = ["z64", "n64", "v64", "n64z", "sfc", "smc", "fig", "swc", "gba", "agb", "smd", "gen", "32x", "sms", "gg", "iso", "gcm", "gcz", "rvz", "wbfs", "wia", "ciso", "chd", "gdi", "cdi", "cso", "pbp", "nds", "3ds", "cia"];
 var BASE_DATA_EXT_RE = new RegExp(`\\.(${BASE_DATA_EXTENSIONS.join("|")})$`, "i");
+var COMPRESSED_SUFFIX_RE = /\.(?:gz|br|xz|zst|bz2|lz4|lzma)$/i;
+var GC_MAGIC = [194, 51, 159, 61];
+var WII_MAGIC = [93, 28, 158, 163];
+var GBA_LOGO = [36, 255, 174, 81, 105, 154, 162, 33, 61, 132, 130, 10];
+var SEGA_MAGIC = [83, 69, 71, 65, 32];
+var CD_SYNC = [0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0];
+var DISC_CONTAINERS = [
+  [82, 86, 90, 1],
+  // "RVZ\x01"
+  [87, 73, 65, 1],
+  // "WIA\x01"
+  [1, 192, 11, 177],
+  // GCZ: 0xB10BC001, little-endian
+  [67, 73, 83, 79],
+  // "CISO"
+  [87, 66, 70, 83],
+  // "WBFS"
+  [77, 67, 111, 109, 112, 114, 72, 68]
+  // "MComprHD": CHD
+];
+var BASE_DATA_MIN_BYTES = 256 * 1024;
+function baseGameDataRefusal(path, by) {
+  return `${path} ${by === "name" ? "is" : "holds"} a game image. Builds and mods must contain none of the base game's data; the player supplies their own copy.`;
+}
+function looksLikeBaseGameData(path, head) {
+  for (let name = path; ; ) {
+    if (BASE_DATA_EXT_RE.test(name)) return true;
+    const inner = name.replace(COMPRESSED_SUFFIX_RE, "");
+    if (inner === name) break;
+    name = inner;
+  }
+  if (!head || head.length < 4) return false;
+  if (findN64Header(head)) return true;
+  const at = (offset, magic) => head.length >= offset + magic.length && magic.every((v, i) => head[offset + i] === v);
+  return at(28, GC_MAGIC) || at(24, WII_MAGIC) || at(4, GBA_LOGO) || at(256, SEGA_MAGIC) || at(0, CD_SYNC) || DISC_CONTAINERS.some((magic) => at(0, magic));
+}
+var N64_MAGICS = [
+  { format: "z64", bytes: [128, 55, 18, 64] },
+  { format: "v64", bytes: [55, 128, 64, 18] },
+  { format: "n64", bytes: [64, 18, 55, 128] }
+];
+var N64_HEADER_OFFSETS = [0, 512];
+function findN64Header(bytes) {
+  for (const offset of N64_HEADER_OFFSETS) {
+    if (offset + 4 > bytes.length) continue;
+    for (const magic of N64_MAGICS) {
+      if (magic.bytes.every((v, i) => bytes[offset + i] === v)) return { format: magic.format, offset };
+    }
+  }
+  return null;
+}
 
 // src/lib/fixpaths.ts
 var SHIM_MARKER = "data-yougame-shim";
@@ -96,6 +150,10 @@ function fixCss(css, path) {
 // src/lib/speedruns.ts
 var MAX_REPLAY_BYTES = 1024 * 1024;
 var MAX_RUN_MS = 6 * 60 * 60 * 1e3;
+
+// src/lib/host-page.ts
+var PAGE_LIMIT = 1 << 20;
+var END_LIMIT = PAGE_LIMIT - (64 << 10);
 
 // src/lib/coins.ts
 var MAX_ITEM_MINUTES = 60 * 24 * 366;
@@ -285,6 +343,14 @@ function isSafePath(p) {
 }
 
 // src/lib/build-check.ts
+var SDK_DOCS = `${docsOrigin()}/sdk.md`;
+function docsOrigin() {
+  try {
+    return process.env.NEXT_PUBLIC_SITE_URL || "https://yougame.co";
+  } catch {
+    return "https://yougame.co";
+  }
+}
 function entryPage(paths) {
   if (paths.includes("index.html")) return { entry: "index.html", pages: ["index.html"] };
   const pages = paths.filter((p) => !p.includes("/") && /\.html?$/i.test(p));
@@ -309,6 +375,24 @@ function buildFolder(names) {
   const paths = names.filter((n) => n.startsWith(prefix)).map((n) => n.slice(prefix.length));
   return { paths: paths.filter((p) => p && !IGNORED_ENTRY.test(p)), folder };
 }
+var UI_DIRECT = new RegExp(
+  [
+    String.raw`YouGame\s*(?:\?\.|\.)\s*ui\b`,
+    String.raw`YouGame\s*(?:\?\.)?\[\s*["'\x60]ui["'\x60]\s*\]`,
+    String.raw`\[\s*["'\x60]YouGame["'\x60]\s*\]\s*(?:\?\.|\.)\s*ui\b`,
+    String.raw`YouGame\s*\)\s*\?\s*void 0\s*:\s*[\w$]+\s*\.\s*ui\b`,
+    String.raw`YouGame\s*\)\s*={2,3}\s*null\s*\?\s*void\s+0\s*:\s*[\w$]+\s*\.\s*ui\b`,
+    String.raw`YouGame\s*\)\s*===\s*null\s*\|\|\s*[\w$]+\s*===\s*void\s+0\s*\?\s*void\s+0\s*:\s*[\w$]+\s*\.\s*ui\b`,
+    String.raw`\.\s*ui\s*(?:\?\.|\.)\s*(?:onChange|getLayout|refresh)\b`,
+    String.raw`--yg-ui-`
+  ].join("|")
+);
+
+// src/lib/desktop-listing.ts
+function desktopFilesProblem(paths) {
+  return paths.length ? `A desktop listing's upload holds only its thumbnail, screenshots and video, sent as listing media. ${paths[0]} is a build file: leave it out, or upload a browser build with its index.html.` : null;
+}
+var DESKTOP_NOT_PACKAGE = "desktop and package cannot be combined: a desktop listing's upload holds only its listing media.";
 
 // src/lib/upload-files.ts
 var REUSE_BATCH_FILES = 25;
@@ -336,6 +420,13 @@ function isPatchOnly(paths, variants = false) {
   return paths.length >= 1 && paths.length <= (variants ? 9 : 1) && paths.every((p) => !!romPatchFormatOf(p));
 }
 function validateUploadFiles(value, opts = {}) {
+  if (opts.desktop) {
+    if (opts.package) return { error: DESKTOP_NOT_PACKAGE };
+    if (value !== void 0 && !Array.isArray(value)) return { error: "Bad file entry" };
+    const problem = desktopFilesProblem((value ?? []).map((f) => String(f?.path ?? "")));
+    if (problem) return { error: problem };
+    return { files: [], total: 0, package: false, desktop: true };
+  }
   if (!Array.isArray(value) || !value.length) return { error: "No files" };
   if (value.length > MAX_FILES) return { error: `Too many files (max ${MAX_FILES})` };
   let total = 0;
@@ -345,8 +436,9 @@ function validateUploadFiles(value, opts = {}) {
     if (!f || typeof f.path !== "string" || !Number.isSafeInteger(f.size) || f.size < 0) return { error: "Bad file entry" };
     if (!isSafePath(f.path)) return { error: `Unsafe path: ${f.path}` };
     if (isHiddenPath(f.path)) return { error: hiddenError(f.path) };
-    if (nativeBuildPath(f.path)) return { error: "Upload native builds from the game's Manage page (Native builds), set platform desktop_app." };
+    if (nativeBuildPath(f.path)) return { error: "Upload native builds from the game's Manage page (Desktop builds), set platform desktop_app." };
     if (!isAllowedBuildFile(f.path)) return { error: `File type not allowed: ${f.path}` };
+    if (looksLikeBaseGameData(f.path)) return { error: baseGameDataRefusal(f.path, "name") };
     if (f.size > MAX_BUILD_FILE_BYTES) return { error: `${f.path} is over 512 MB. Single files are capped at 512 MB.` };
     if (f.path.startsWith("__")) return { error: `Reserved name: ${f.path}` };
     if (seen.has(f.path)) return { error: `Duplicate path: ${f.path}` };
@@ -357,7 +449,7 @@ function validateUploadFiles(value, opts = {}) {
   const pkg = !!opts.package || isPatchOnly([...seen]);
   if (!seen.has("index.html") && !pkg) return { error: "Build must contain index.html at the top level. A ROM mod is one .ips, .ups, .bps or .xdelta file and nothing else; a cosmetic's package is declared with package: true." };
   if (total > MAX_UPLOAD_BYTES) return { error: "Build is over 5 GB unzipped" };
-  return { files, total, package: pkg };
+  return { files, total, package: pkg, desktop: false };
 }
 
 // scripts/upload-build.mjs
@@ -372,11 +464,132 @@ async function prepareDesktopFiles(scratch) {
   }
   return { files, package: false };
 }
+var ZIP_SKIPPED = /(^|\/)(__MACOSX|node_modules|\.git)(\/|$)/;
+async function isZipFile(path) {
+  const handle = await open(path, "r");
+  try {
+    const head = Buffer.alloc(4);
+    const { bytesRead } = await handle.read(head, 0, 4, 0);
+    return bytesRead === 4 && head[0] === 80 && head[1] === 75 && (head[2] === 3 && head[3] === 4 || head[2] === 5 && head[3] === 6);
+  } finally {
+    await handle.close();
+  }
+}
+async function unpackZip(zipPath, dest) {
+  const handle = await open(zipPath, "r");
+  const read = async (position, length) => {
+    const buf = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buf, 0, length, position);
+    if (bytesRead !== length) throw new Error("The zip is cut short.");
+    return buf;
+  };
+  try {
+    const size = (await handle.stat()).size;
+    const tailLength = Math.min(size, 22 + 65535);
+    const tail = await read(size - tailLength, tailLength);
+    let eocd = -1;
+    for (let i = tailLength - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 101010256) {
+      eocd = i;
+      break;
+    }
+    if (eocd < 0) throw new Error("Not a zip file (no end of central directory).");
+    let entries = tail.readUInt16LE(eocd + 10);
+    let cdSize = tail.readUInt32LE(eocd + 12);
+    let cdOffset = tail.readUInt32LE(eocd + 16);
+    if (entries === 65535 || cdSize === 4294967295 || cdOffset === 4294967295) {
+      const locator = eocd - 20;
+      if (locator < 0 || tail.readUInt32LE(locator) !== 117853008) throw new Error("The zip's ZIP64 record is missing.");
+      const record = await read(Number(tail.readBigUInt64LE(locator + 8)), 56);
+      if (record.readUInt32LE(0) !== 101075792) throw new Error("The zip's ZIP64 record is damaged.");
+      entries = Number(record.readBigUInt64LE(32));
+      cdSize = Number(record.readBigUInt64LE(40));
+      cdOffset = Number(record.readBigUInt64LE(48));
+    }
+    if (cdOffset + cdSize > size || cdSize > 64 * 1024 * 1024) throw new Error("The zip's central directory is damaged.");
+    const cd = await read(cdOffset, cdSize);
+    const files = [];
+    const seen = /* @__PURE__ */ new Set();
+    let total = 0;
+    for (let at = 0, n = 0; n < entries; n++) {
+      if (at + 46 > cd.length || cd.readUInt32LE(at) !== 33639248) throw new Error("The zip's central directory is damaged.");
+      const madeBy = cd.readUInt16LE(at + 4) >> 8;
+      const flags = cd.readUInt16LE(at + 8);
+      const method = cd.readUInt16LE(at + 10);
+      const crc = cd.readUInt32LE(at + 16);
+      let compressed = cd.readUInt32LE(at + 20);
+      let unpacked = cd.readUInt32LE(at + 24);
+      const nameLength = cd.readUInt16LE(at + 28);
+      const extraLength = cd.readUInt16LE(at + 30);
+      const commentLength = cd.readUInt16LE(at + 32);
+      const mode = cd.readUInt32LE(at + 38) >>> 16;
+      let local = cd.readUInt32LE(at + 42);
+      const rawName = cd.subarray(at + 46, at + 46 + nameLength).toString(flags & 2048 ? "utf8" : "latin1");
+      for (let x = at + 46 + nameLength, end = x + extraLength; x + 4 <= end; ) {
+        const id = cd.readUInt16LE(x);
+        const length = cd.readUInt16LE(x + 2);
+        if (id === 1) {
+          let y = x + 4;
+          const next = () => {
+            const v = Number(cd.readBigUInt64LE(y));
+            y += 8;
+            return v;
+          };
+          if (unpacked === 4294967295) unpacked = next();
+          if (compressed === 4294967295) compressed = next();
+          if (local === 4294967295) local = next();
+        }
+        x += 4 + length;
+      }
+      at += 46 + nameLength + extraLength + commentLength;
+      const name = rawName.replace(/\\/g, "/").replace(/^(\.?\/)+/, "");
+      if (name.endsWith("/")) continue;
+      if (ZIP_SKIPPED.test(name) || IGNORED_ENTRY.test(basename(name))) continue;
+      if (!isSafePath(name)) throw new Error(`Unsafe path in the zip: ${rawName}`);
+      if (madeBy === 3 && (mode & 61440) === 40960) throw new Error(`Refusing symlink in the zip: ${name}. Put the file itself in the build.`);
+      if (flags & 1) throw new Error(`${name} is encrypted in the zip. Zip the build again without a password.`);
+      if (method !== 0 && method !== 8) throw new Error(`${name} uses a zip compression this helper can't read (method ${method}). Zip it again with ordinary deflate, or pass the build folder.`);
+      if (seen.has(name.toLowerCase())) throw new Error(`Duplicate path in the zip: ${name} (names that differ only in case count as one)`);
+      seen.add(name.toLowerCase());
+      if (unpacked > MAX_BUILD_FILE_BYTES) throw new Error(`${name} is ${Math.round(unpacked / 1048576)} MB; a build file can be up to ${MAX_BUILD_FILE_BYTES / 1048576} MB.`);
+      total += unpacked;
+      if (total > MAX_UPLOAD_BYTES) throw new Error(`The build is over ${MAX_UPLOAD_BYTES / 1073741824} GB unzipped.`);
+      if (seen.size > MAX_FILES) throw new Error(`Too many files (max ${MAX_FILES})`);
+      files.push({ name, method, crc, compressed, unpacked, local });
+    }
+    for (const f of files) {
+      const header = await read(f.local, 30);
+      if (header.readUInt32LE(0) !== 67324752) throw new Error(`The zip is damaged at ${f.name}.`);
+      const start = f.local + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
+      if (start + f.compressed > size) throw new Error(`The zip is cut short at ${f.name}.`);
+      const target = join(dest, f.name);
+      await mkdir(dirname(target), { recursive: true });
+      let written = 0;
+      let sum = 0;
+      const count = new Transform({
+        transform(chunk, _encoding, done) {
+          written += chunk.length;
+          if (written > f.unpacked) return done(new Error(`${f.name} holds more than the zip says it does.`));
+          if (zlib.crc32) sum = zlib.crc32(chunk, sum);
+          done(null, chunk);
+        }
+      });
+      const source = f.compressed ? createReadStream(zipPath, { start, end: start + f.compressed - 1 }) : null;
+      if (!source) await writeFile(target, "", { flag: "wx" });
+      else if (f.method === 0) await pipeline(source, count, createWriteStream(target, { flags: "wx" }));
+      else await pipeline(source, zlib.createInflateRaw(), count, createWriteStream(target, { flags: "wx" }));
+      if (written !== f.unpacked) throw new Error(`${f.name} holds ${written} bytes, not the ${f.unpacked} the zip says.`);
+      if (written && zlib.crc32 && sum !== f.crc) throw new Error(`${f.name} is damaged in the zip (CRC mismatch).`);
+    }
+    return files.length;
+  } finally {
+    await handle.close();
+  }
+}
 async function prepareFiles(directory, scratch, opts = {}) {
   const paths = [];
   const target = await stat(directory);
   if (target.isFile()) {
-    if (!romPatchFormatOf(basename(directory))) throw new Error("Point at a build folder, or at a ROM mod's one patch file (.ips, .ups, .bps or .xdelta).");
+    if (!romPatchFormatOf(basename(directory))) throw new Error("Point at a build folder, the build's .zip, or a ROM mod's one patch file (.ips, .ups, .bps or .xdelta).");
     paths.push(basename(directory));
     directory = dirname(directory);
   }
@@ -489,7 +702,14 @@ async function uploadBuild(directory, { token = process.env.YOUGAME_UPLOAD_TOKEN
   }
   const scratch = await mkdtemp(join(tmpdir(), "yougame-upload-"));
   try {
-    const { files, package: pkg } = desktopApp ? await prepareDesktopFiles(scratch) : await prepareFiles(resolve(directory), scratch, { package: packageOpt });
+    let source = desktopApp ? null : resolve(directory);
+    if (source && (await stat(source)).isFile() && await isZipFile(source)) {
+      const unpacked = join(scratch, "zip");
+      await mkdir(unpacked);
+      console.error(`Unpacked ${await unpackZip(source, unpacked)} files from ${basename(source)}.`);
+      source = unpacked;
+    }
+    const { files, package: pkg } = desktopApp ? await prepareDesktopFiles(scratch) : await prepareFiles(source, scratch, { package: packageOpt });
     await inParallel(files.filter((file) => !usesParts(file.size)), 4, async (file) => {
       file.sha256 = await sha256Of(file.local);
     });
@@ -500,7 +720,7 @@ async function uploadBuild(directory, { token = process.env.YOUGAME_UPLOAD_TOKEN
         const answer = await json("/api/upload/reuse", { id: start.uploadId, files: batch.map(({ path, sha256 }) => ({ path, sha256 })) }).catch(() => ({ reused: [] }));
         for (const path of answer.reused) reused.add(path);
       });
-    } else if (from) console.error(`Can't reuse files from ${from}: it isn't a build of yours, or this account has reused a lot this hour. Sending every file.`);
+    } else if (from) console.error(`Can't reuse files from ${from}: ${start.reuseNote ?? "it isn't a build of yours, or this account has reused a lot this hour."} Sending every file.`);
     const toSend = files.filter((file) => !reused.has(file.path));
     const reusedBytes = files.reduce((sum, file) => sum + (reused.has(file.path) ? file.size : 0), 0);
     console.error(`Upload ${start.uploadId}: streaming ${toSend.length} ${pkg ? "package " : ""}${toSend.length === 1 ? "file" : "files"}${reused.size ? `, ${reused.size} unchanged (${Math.round(reusedBytes / 1048576)} MB not sent)` : ""}.`);
@@ -542,7 +762,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const desktopApp = args.includes("--desktop-app");
   const targets = args.filter((a) => a !== "--package" && a !== "--desktop-app");
   if (fromAt >= 0 && (!from || from.startsWith("--") || desktopApp) || (desktopApp ? targets.length !== 0 || packageOpt : targets.length !== 1 || targets[0].startsWith("--"))) {
-    console.error("Usage: node upload-build.mjs --desktop-app (no folder), or [--package] [--from <your game's slug | earlier uploadId>] <build-folder | patch-file> (Node 22+). --from copies files that haven't changed instead of sending them again. Set YOUGAME_UPLOAD_TOKEN or YOUGAME_API_KEY.");
+    console.error("Usage: node upload-build.mjs --desktop-app (no folder), or [--package] [--from <your game's slug | earlier uploadId>] <build-folder | build.zip | patch-file> (Node 22+). Up to 5 GB per build and 512 MB per file; a file over 100 MB goes up in parts by itself. --from copies files that haven't changed instead of sending them again. Set YOUGAME_UPLOAD_TOKEN or YOUGAME_API_KEY.");
     process.exitCode = 2;
   } else {
     try {
@@ -558,7 +778,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 export {
   DESKTOP_APP_MANIFEST,
   DESKTOP_APP_PAGE,
+  isZipFile,
   prepareDesktopFiles,
   prepareFiles,
+  unpackZip,
   uploadBuild
 };

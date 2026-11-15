@@ -230,6 +230,8 @@ listing field is `voice_everyone: true` (or the switch on the game's Manage page
 it covers match rooms (first ten players), not worlds.
 See "Proximity chat" in the reference.
 
+Set `whole_game_lobby` true when the game's online play is a single lobby that starts the whole game together, false when the game has several lobby or mode types players pick inside the game; leave it unset if unsure.
+
 The game's job is the
 host-authoritative loop — host simulates, others send inputs, host broadcasts state at
 20–30 Hz with positions as fractions of the playfield, every active connection reports each game and completes the final match.

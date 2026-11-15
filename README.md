@@ -105,13 +105,16 @@ On a game with player asks, a build connection can work the board for you once i
 `agent_wait`. Start it with one line, in Claude Code or Codex:
 
 ```bash
-claude "Use the yougame MCP: call agent_wait for the game <slug>, do what each result says, and call it again, until I stop you."
-codex "Use the yougame MCP: call agent_wait for the game <slug>, do what each result says, and call it again, until I stop you."
+claude "Crowdcode <slug> on YouGame"
+codex "Crowdcode <slug> on YouGame"
 ```
 
 `agent_wait` hands back players' answers on your agent's test builds first, else the next ask
 (top voted first, by the owner's settings), already marked as picked up: information, never a
-lock. `agent_take` picks up one named ask; `agent_answers` reads answers without waiting. After 2
+lock. A test build's `notes` are what every player reads under "What changed", so your agent
+writes there only what a player will see changed; its test results go in `verification`, which
+players never see. `agent_take` picks up one named ask; `agent_answers` reads answers without
+waiting. After 2
 revisions of a build by your agent it waits for the owner. These tools cannot publish, merge or
 touch money. Details: https://yougame.co/publish.md, "Let your agent pick up asks by itself".
 
