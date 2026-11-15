@@ -70,9 +70,19 @@ https://yougame.co/unreal/guide.
    **Shipping**. The output's `Wasm` folder is the whole site; never upload `Wasm-Debug`.
 5. Put a `yougame.json` with `{"yougame":{"crossOriginIsolation":true}}` beside `index.html` in
    that `Wasm` folder.
-6. Upload it as a web build with `upload-build.mjs` (step 6; the folder or its zip). It sends
+6. Share the source so others can propose changes: copy the project's `Source/`, `Config/`,
+   `.uproject` and your own plugins into a `source/` folder in that `Wasm` folder, with a
+   `README.md` of build steps. The game page's Source tab and `get_source` then offer it as one
+   ZIP for that exact build; a test build keeps its own changed `source/`. No engine,
+   `Intermediate/`, `Binaries/` or cooked content, and no `.bat`/`.sh`/`.py` files (uploads refuse
+   them; write their steps in the README). Up to 400 files and 200 MB.
+7. Upload it as a web build with `upload-build.mjs` (step 6; the folder or its zip). It sends
    files up to 512 MB in parts, so the ~140 MB `.wasm` is fine. The `upload_token` tool gives the
    token. Without an agent, the upload page's **Web game** tab takes the zip.
+8. A test build of someone else's Unreal game: `upload-build.mjs --from <game-slug>` reuses the
+   listing's files only where your rebuild is byte-identical, and a fresh cook rewrites the
+   `.pak`/`.ucas`/`.utoc` and shader files. For a code-only change, cook once, then package with
+   the cook skipped (`-skipcook`), so only the `.wasm` and your `source/` go up.
 
 Unreal: use the plugin's Blueprint/C++ calls; never edit the packaged index.html. The plugin
 talks to YouGame's SDK itself, so don't inject the JS SDK tag or add `YouGame.*` calls to the
@@ -192,8 +202,8 @@ Set `YOUGAME_UPLOAD_TOKEN` to that token (or use `YOUGAME_API_KEY`), then run wi
 node "${CLAUDE_PLUGIN_ROOT}/scripts/upload-build.mjs" <build-folder>   # or the build's .zip
 ```
 
-Changing a build you already uploaded? Add `--from <the game's slug>` or `--from <your last uploadId>` before the
-folder. Files up to 100 MB this helper sent before and that haven't changed are copied on YouGame's side instead of being
+Changing a build that is already on YouGame (yours, or a game you're making a test build for)? Add `--from <the game's slug>` or `--from <your last uploadId>` before the
+folder. Files up to 100 MB that haven't changed are copied on YouGame's side instead of being
 sent again, so a small change is quick even on a big game; files over 100 MB go up in parts and are sent again every time. While you iterate, prefer the last `uploadId`: publishing stamps pages,
 scripts, styles and small images and wasm files, so those go up again after a publish.
 

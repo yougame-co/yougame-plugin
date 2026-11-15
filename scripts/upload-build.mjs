@@ -24,7 +24,6 @@ import * as zlib from "node:zlib";
 
 // src/lib/desktop-handoff.ts
 var APP_SCHEME = process.env.NEXT_PUBLIC_SITE_URL === "https://staging.yougame.co" ? "yougame-staging" : "yougame";
-var LINUX_STAGE = process.env.NEXT_PUBLIC_SITE_URL === "https://staging.yougame.co" ? "alpha" : "off";
 
 // src/lib/orca.ts
 var ORCA_LINEAGE = Object.freeze({ "0.3.51": "0.3.44" });
@@ -154,53 +153,6 @@ var MAX_RUN_MS = 6 * 60 * 60 * 1e3;
 // src/lib/host-page.ts
 var PAGE_LIMIT = 1 << 20;
 var END_LIMIT = PAGE_LIMIT - (64 << 10);
-
-// src/lib/coins.ts
-var MAX_ITEM_MINUTES = 60 * 24 * 366;
-var PAYOUT_CENTS_PER_1000_GOLD = 55;
-var MIN_PAYOUT_GOLD = Math.ceil(2500 * 1e3 / PAYOUT_CENTS_PER_1000_GOLD);
-var MAX_PAYOUT_CENTS = 5e4;
-var MAX_PAYOUT_GOLD = Math.floor(MAX_PAYOUT_CENTS * 1e3 / PAYOUT_CENTS_PER_1000_GOLD);
-var GOLD_PACKS = [
-  { gold: 6400, cents: 499 },
-  { gold: 13e3, cents: 999 },
-  { gold: 27e3, cents: 1999 },
-  { gold: 7e4, cents: 4999 },
-  { gold: 145e3, cents: 9999 }
-];
-var IAP_CENTS = [599, 1299, 2499, 5999, 12499];
-var IAP_PACKS = GOLD_PACKS.map((p, i) => ({ productId: `co.yougame.gold.${p.gold}`, gold: p.gold, cents: IAP_CENTS[i], webCents: p.cents }));
-var WEB_SAVING_PERCENT = Math.min(...IAP_PACKS.map((p) => Math.floor((1 - p.webCents / p.cents) * 100)));
-
-// node_modules/@opennextjs/cloudflare/dist/api/cloudflare-context.js
-var cloudflareContextSymbol = Symbol.for("__cloudflare-context__");
-
-// src/lib/engine-servers.ts
-var ENGINE_SIZES = {
-  lite: 1 / 16,
-  basic: 1 / 4,
-  "standard-1": 1 / 2,
-  "standard-2": 1,
-  "standard-3": 2,
-  "standard-4": 4
-};
-var ROLLOUT_GRACE_SECONDS = 3 * 60 * 60;
-
-// src/lib/flags.ts
-init_supabase();
-
-// src/lib/maintenance.mjs
-var MAINTENANCE_BACK_MS = 15 * 6e4;
-var MAINTENANCE_STALE_MS = 3 * 60 * 6e4;
-
-// src/lib/server-files.ts
-var MAX_SERVER_FILES_BYTES = 2 * 1024 * 1024 * 1024;
-var MAX_SERVER_FILES_ACCOUNT_BYTES = 4 * 1024 * 1024 * 1024;
-var SERVER_FILES_PART_BYTES = 64 * 1024 * 1024;
-var SERVER_FILES_TTL_MS = 20 * 60 * 1e3;
-
-// src/lib/server-lite.ts
-var MAX_SERVER_MODULE_BYTES = 1024 * 1024;
 
 // src/lib/site.ts
 var SITE_NAME = "YouGame";
@@ -342,8 +294,75 @@ function isSafePath(p) {
   return true;
 }
 
+// src/lib/crew-rules.ts
+var DEFAULT_CAPS = {
+  files: 20,
+  lines: 300,
+  bytes: 2 * 1024 * 1024,
+  binary_bytes: 1024
+};
+var USERINFO = "(?:[^\\s/?#@\"'`<>\\\\]*@)?";
+var HOST = "([A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*)";
+var URL_HOST_RE = new RegExp(`\\b(?:https?|wss?|ftp):\\/\\/${USERINFO}${HOST}(?::\\d+)?`, "gi");
+var RELATIVE_HOST_RE = new RegExp(
+  `["'\`(=]\\/\\/${USERINFO}([A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)`,
+  "g"
+);
+
+// src/lib/build-carried-source.ts
+var SOURCE_MAX_BYTES = 200 * 1024 * 1024;
+var SOURCE_MAX_FILE_BYTES = 32 * 1024 * 1024;
+
+// src/lib/coins.ts
+var MAX_ITEM_MINUTES = 60 * 24 * 366;
+var PAYOUT_CENTS_PER_1000_GOLD = 55;
+var MIN_PAYOUT_GOLD = Math.ceil(2500 * 1e3 / PAYOUT_CENTS_PER_1000_GOLD);
+var MAX_PAYOUT_CENTS = 5e4;
+var MAX_PAYOUT_GOLD = Math.floor(MAX_PAYOUT_CENTS * 1e3 / PAYOUT_CENTS_PER_1000_GOLD);
+var GOLD_PACKS = [
+  { gold: 6400, cents: 499 },
+  { gold: 13e3, cents: 999 },
+  { gold: 27e3, cents: 1999 },
+  { gold: 7e4, cents: 4999 },
+  { gold: 145e3, cents: 9999 }
+];
+var IAP_CENTS = [599, 1299, 2499, 5999, 12499];
+var IAP_PACKS = GOLD_PACKS.map((p, i) => ({ productId: `co.yougame.gold.${p.gold}`, gold: p.gold, cents: IAP_CENTS[i], webCents: p.cents }));
+var WEB_SAVING_PERCENT = Math.min(...IAP_PACKS.map((p) => Math.floor((1 - p.webCents / p.cents) * 100)));
+
+// node_modules/@opennextjs/cloudflare/dist/api/cloudflare-context.js
+var cloudflareContextSymbol = Symbol.for("__cloudflare-context__");
+
+// src/lib/engine-servers.ts
+var ENGINE_SIZES = {
+  lite: 1 / 16,
+  basic: 1 / 4,
+  "standard-1": 1 / 2,
+  "standard-2": 1,
+  "standard-3": 2,
+  "standard-4": 4
+};
+var ROLLOUT_GRACE_SECONDS = 3 * 60 * 60;
+
+// src/lib/flags.ts
+init_supabase();
+
+// src/lib/maintenance.mjs
+var MAINTENANCE_BACK_MS = 15 * 6e4;
+var MAINTENANCE_STALE_MS = 3 * 60 * 6e4;
+
+// src/lib/server-files.ts
+var MAX_SERVER_FILES_BYTES = 2 * 1024 * 1024 * 1024;
+var MAX_SERVER_FILES_ACCOUNT_BYTES = 4 * 1024 * 1024 * 1024;
+var SERVER_FILES_PART_BYTES = 64 * 1024 * 1024;
+var SERVER_FILES_TTL_MS = 20 * 60 * 1e3;
+
+// src/lib/server-lite.ts
+var MAX_SERVER_MODULE_BYTES = 1024 * 1024;
+
 // src/lib/build-check.ts
 var SDK_DOCS = `${docsOrigin()}/sdk.md`;
+var UNREAL_SDK_DETAIL = `In an Unreal game the YouGame plugin is the SDK (${docsOrigin()}/unreal/guide): its Blueprint and C++ nodes add sign-in, Find Match, scores and saves. Upload the packaged folder as it is; don't add a script tag to the index.html Epic's packager writes.`;
 function docsOrigin() {
   try {
     return process.env.NEXT_PUBLIC_SITE_URL || "https://yougame.co";
@@ -720,7 +739,7 @@ async function uploadBuild(directory, { token = process.env.YOUGAME_UPLOAD_TOKEN
         const answer = await json("/api/upload/reuse", { id: start.uploadId, files: batch.map(({ path, sha256 }) => ({ path, sha256 })) }).catch(() => ({ reused: [] }));
         for (const path of answer.reused) reused.add(path);
       });
-    } else if (from) console.error(`Can't reuse files from ${from}: ${start.reuseNote ?? "it isn't a build of yours, or this account has reused a lot this hour."} Sending every file.`);
+    } else if (from) console.error(`Can't reuse files from ${from}: ${start.reuseNote ?? "it isn't your game or one you can make test builds for, or this account has reused a lot this hour."} Sending every file.`);
     const toSend = files.filter((file) => !reused.has(file.path));
     const reusedBytes = files.reduce((sum, file) => sum + (reused.has(file.path) ? file.size : 0), 0);
     console.error(`Upload ${start.uploadId}: streaming ${toSend.length} ${pkg ? "package " : ""}${toSend.length === 1 ? "file" : "files"}${reused.size ? `, ${reused.size} unchanged (${Math.round(reusedBytes / 1048576)} MB not sent)` : ""}.`);
@@ -762,7 +781,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const desktopApp = args.includes("--desktop-app");
   const targets = args.filter((a) => a !== "--package" && a !== "--desktop-app");
   if (fromAt >= 0 && (!from || from.startsWith("--") || desktopApp) || (desktopApp ? targets.length !== 0 || packageOpt : targets.length !== 1 || targets[0].startsWith("--"))) {
-    console.error("Usage: node upload-build.mjs --desktop-app (no folder), or [--package] [--from <your game's slug | earlier uploadId>] <build-folder | build.zip | patch-file> (Node 22+). Up to 5 GB per build and 512 MB per file; a file over 100 MB goes up in parts by itself. --from copies files that haven't changed instead of sending them again. Set YOUGAME_UPLOAD_TOKEN or YOUGAME_API_KEY.");
+    console.error("Usage: node upload-build.mjs --desktop-app (no folder), or [--package] [--from <game slug | earlier uploadId>] <build-folder | build.zip | patch-file> (Node 22+). Up to 5 GB per build and 512 MB per file; a file over 100 MB goes up in parts by itself. --from copies files that haven't changed instead of sending them again. Set YOUGAME_UPLOAD_TOKEN or YOUGAME_API_KEY.");
     process.exitCode = 2;
   } else {
     try {
