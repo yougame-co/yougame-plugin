@@ -70,7 +70,10 @@ https://yougame.co/unreal/guide.
    **Shipping**. The output's `Wasm` folder is the whole site; never upload `Wasm-Debug`.
 5. Put a `yougame.json` with `{"yougame":{"crossOriginIsolation":true}}` beside `index.html` in
    that `Wasm` folder.
-6. Share the source so others can propose changes: copy the project's `Source/`, `Config/`,
+6. Optional, and only when the creator wants others to build on the game: share the source.
+   Never tell a creator they must; a paid or owner-built game needs no source on YouGame. It is
+   only expected when the game is open to anyone's test builds, or its licence requires it (GPL
+   and similar). To share it, copy the project's `Source/`, `Config/`,
    `.uproject` and your own plugins into a `source/` folder in that `Wasm` folder, with a
    `README.md` of build steps. The game page's Source tab and `get_source` then offer it as one
    ZIP for that exact build; a test build keeps its own changed `source/`. No engine,

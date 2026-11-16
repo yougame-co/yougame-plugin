@@ -481,11 +481,20 @@ var DIRECT_UA_TOKEN = "YouGameDirect/1";
 var MOD_PATCH_7Z_UA_TOKEN = "YouGameModPatch7z/1";
 var MOD_AUTHOR_PAGE_UA_TOKEN = "YouGameModAuthorPage/1";
 var EXTERNAL_BUILD_UA_TOKEN = "YouGameExternalBuild/1";
+var HOSTED_ROM_UA_TOKEN = "YouGameHostedRom/1";
+var EXTERNAL_MAC_UA_TOKEN = "YouGameExternalMac/1";
+var OWN_COPY_STAGE_UA_TOKEN = "YouGameOwnCopyStage/1";
 var STEAM_BASE_UA_TOKEN = "YouGameSteamBase/1";
 var NATIVE_KNOBS_UA_TOKEN = "YouGameNativeKnobs/1";
 var MULTI_DISC_UA_TOKEN = "YouGameMultiDisc/1";
+var DISC_FILES_UA_TOKEN = "YouGameDiscFiles/1";
+var DISC_FILES_2_UA_TOKEN = "YouGameDiscFiles/2";
 var MAX_EXTRA_DISCS = 4;
 var DISC_SLOT = /^[a-z][a-z0-9-]{0,15}$/;
+var MAX_DISC_FILES = 256;
+function discFilesEntry(file) {
+  return typeof file === "string" && file.length > 0 && file.length <= 260 && !file.includes("..") && !/[\\:\0-\x1f\x7f]/.test(file) && file.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+}
 function discSlot(slot) {
   return typeof slot === "string" && DISC_SLOT.test(slot) && slot !== "base";
 }
@@ -555,30 +564,46 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: `${LAUNCH_SPEC_FILE} must be an object` };
   const o = raw;
   const nativeKnobs = userAgent.split(/\s+/).includes(NATIVE_KNOBS_UA_TOKEN);
-  for (const k of Object.keys(o)) if (!["version", "args", "disc", "modPatch", "embed", "controllers", "net", "memoryMb", ...userAgent.split(/\s+/).includes(DIRECT_UA_TOKEN) ? ["direct"] : [], ...userAgent.split(/\s+/).includes(STEAM_BASE_UA_TOKEN) ? ["base", "folders", "children"] : [], ...nativeKnobs ? ["wholeBuild", "appDlls"] : [], ...userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN) ? ["stage", "derived", "licence"] : [], ...userAgent.split(/\s+/).includes(MULTI_DISC_UA_TOKEN) ? ["discs"] : []].includes(k)) return { error: `unknown field "${k}"` };
+  for (const k of Object.keys(o)) if (!["version", "args", "disc", "modPatch", "embed", "controllers", "net", "memoryMb", ...userAgent.split(/\s+/).includes(DIRECT_UA_TOKEN) ? ["direct"] : [], ...userAgent.split(/\s+/).includes(STEAM_BASE_UA_TOKEN) ? ["base", "folders", "children"] : [], ...nativeKnobs ? ["wholeBuild", "appDlls"] : [], ...userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN) ? ["stage", "derived", "licence"] : userAgent.split(/\s+/).includes(HOSTED_ROM_UA_TOKEN) ? ["stage"] : [], ...userAgent.split(/\s+/).includes(MULTI_DISC_UA_TOKEN) ? ["discs"] : []].includes(k)) return { error: `unknown field "${k}"` };
   if (o.version !== 1) return { error: "version must be 1" };
   const args = o.args ?? [];
   if (!Array.isArray(args) || args.length > 64 || !args.every((a) => typeof a === "string" && a.length <= 1024 && !/[\0\r\n]/.test(a)))
     return { error: "args must be at most 64 strings of at most 1024 characters" };
   let discs;
+  let discFileLists;
   if (o.discs !== void 0) {
     const d = o.discs;
-    if (!d || typeof d !== "object" || Array.isArray(d) || Object.keys(d).length > MAX_EXTRA_DISCS || !Object.entries(d).every(([slot, v]) => discSlot(slot) && (v === true || v === "optional")))
+    const lists = userAgent.split(/\s+/).includes(DISC_FILES_2_UA_TOKEN);
+    if (!d || typeof d !== "object" || Array.isArray(d) || Object.keys(d).length > MAX_EXTRA_DISCS || !Object.entries(d).every(([slot, v]) => discSlot(slot) && (v === true || v === "optional" || lists && !!v && typeof v === "object" && !Array.isArray(v))))
       return { error: `discs must map at most ${MAX_EXTRA_DISCS} slots (a-z, 0-9, "-", not "base") to true or "optional"` };
     discs = {};
-    for (const [slot, v] of Object.entries(d)) discs[slot] = v === true ? "required" : "optional";
+    for (const [slot, v] of Object.entries(d)) {
+      if (v === true || v === "optional") {
+        discs[slot] = v === true ? "required" : "optional";
+        continue;
+      }
+      const entry = v;
+      const files = entry.files;
+      if (Object.keys(entry).some((k) => k !== "need" && k !== "files") || entry.need !== void 0 && entry.need !== true && entry.need !== "optional" || !Array.isArray(files) || files.length < 1 || files.length > MAX_DISC_FILES || !files.every((file) => discFilesEntry(file)))
+        return { error: `discs.${slot} must be {"need": true or "optional", "files": 1 to ${MAX_DISC_FILES} paths inside the disc's files/ folder, forward slashes, no leading "/" and no "..", each at most 260 characters}` };
+      discs[slot] = entry.need === "optional" ? "optional" : "required";
+      (discFileLists ??= {})[slot] = [...new Set(files)];
+    }
   }
   for (const a of args) {
     for (const m of a.matchAll(PLACEHOLDER)) {
       if (m[2] !== void 0) {
         if (m[1] !== "disc") return { error: `unknown placeholder {${m[1]}:${m[2]}}` };
-        if (!discSlot(m[2])) return { error: `bad disc slot in {disc:${m[2]}}` };
-        if (!discs || !Object.hasOwn(discs, m[2])) return { error: `{disc:${m[2]}} needs "discs": {"${m[2]}": \u2026}` };
+        const files = m[2].endsWith(":files");
+        const slot = files ? m[2].slice(0, -":files".length) : m[2];
+        if (files && !userAgent.split(/\s+/).includes(DISC_FILES_UA_TOKEN)) return { error: `unknown placeholder {disc:${m[2]}}` };
+        if (!discSlot(slot)) return { error: `bad disc slot in {disc:${m[2]}}` };
+        if (!discs || !Object.hasOwn(discs, slot)) return { error: `{disc:${slot}} needs "discs": {"${slot}": \u2026}` };
       } else if (!KNOWN.has(m[1])) return { error: `unknown placeholder {${m[1]}}` };
     }
     if (a.replace(PLACEHOLDER, "").includes("{")) return { error: `stray "{" in "${a}"` };
   }
-  const disc = o.disc === true;
+  const disc = o.disc === true || Array.isArray(o.stage) && o.stage.some((op) => op && typeof op === "object" && typeof op.disc === "string");
   if (o.disc !== void 0 && typeof o.disc !== "boolean") return { error: "disc must be true or false" };
   if (!disc && args.some((a) => a.includes("{disc}"))) return { error: '{disc} needs "disc": true' };
   if (o.modPatch !== void 0) {
@@ -592,18 +617,27 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (o.stage !== void 0) {
     if (!Array.isArray(o.stage) || o.stage.length > 16) return { error: "stage must be at most 16 operations" };
     const targets = [];
-    let roms = 0;
+    let roms = 0, stagedDiscs = 0;
     for (const op of o.stage) {
       if (!op || typeof op !== "object" || Array.isArray(op)) return { error: "invalid stage operation" };
       const keys = Object.keys(op).sort().join(",");
       if (keys === "rom") {
-        if (!stagePath(op.rom) || op.rom.includes("/") || !op.rom.endsWith(".z64") || ++roms > 1) return { error: "stage.rom must name one .z64 file" };
+        if (disc) return { error: 'stage.rom cannot be combined with "disc": true' };
+        if (!stagePath(op.rom) || op.rom.includes("/") || !/\.(z64|sfc|nds)$/.test(op.rom) || ++roms > 1) return { error: "stage.rom must name one .z64, .sfc or .nds file" };
+        if (!op.rom.endsWith(".z64") && !userAgent.split(/\s+/).includes(OWN_COPY_STAGE_UA_TOKEN)) return { error: "Update YouGame to play this build." };
+      } else if (keys === "disc") {
+        if (!userAgent.split(/\s+/).includes(OWN_COPY_STAGE_UA_TOKEN)) return { error: "Update YouGame to play this build." };
+        if (!userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN)) return { error: "stage.disc is external-only" };
+        if (!stagePath(op.disc) || op.disc.includes("/") || !/\.(iso|rvz|chd|cue|bin)$/.test(op.disc) || ++stagedDiscs > 1) return { error: "stage.disc must name one disc image" };
+        if (o.modPatch !== void 0) return { error: "stage.disc cannot be combined with modPatch" };
       } else if (keys === "copy,to") {
+        if (!userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN)) return { error: "stage.copy is external-only" };
         if (!stagePath(op.copy) || !stagePath(op.to)) return { error: "stage.copy and to must be safe relative paths" };
       } else if (keys === "touch") {
+        if (!userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN)) return { error: "stage.touch is external-only" };
         if (!stagePath(op.touch)) return { error: "stage.touch must be a safe relative path" };
       } else return { error: "invalid stage operation" };
-      const target = (op.rom ?? op.to ?? op.touch).toLowerCase();
+      const target = (op.rom ?? op.disc ?? op.to ?? op.touch).toLowerCase();
       if (targets.some((t) => t === target || t.startsWith(target + "/") || target.startsWith(t + "/"))) return { error: "stage targets overlap" };
       targets.push(target);
     }
@@ -645,7 +679,7 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   let embed = null;
   if (o.embed !== void 0) {
     const e = o.embed;
-    if (!e || typeof e !== "object" || typeof e.class !== "string" || typeof e.title !== "string" || !WINDOW_NAME.test(e.class) || !WINDOW_NAME.test(e.title) || (e.class.includes(":") || e.title.includes(":")) && !userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN))
+    if (!e || typeof e !== "object" || typeof e.class !== "string" || typeof e.title !== "string" || !WINDOW_NAME.test(e.class) || !WINDOW_NAME.test(e.title) || (e.class.includes(":") || e.title.includes(":")) && !userAgent.split(/\s+/).some((token) => token === EXTERNAL_BUILD_UA_TOKEN || token === HOSTED_ROM_UA_TOKEN))
       return { error: "embed needs a window class and title (letters, digits, space . _ -)" };
     embed = { cls: e.class, title: e.title };
   }
@@ -655,9 +689,9 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (o.direct === true && o.net !== "yougame") return { error: 'direct needs net "yougame"' };
   const memoryMb = o.memoryMb === void 0 ? 4096 : o.memoryMb;
   if (typeof memoryMb !== "number" || !Number.isInteger(memoryMb) || memoryMb < 512 || memoryMb > 16384) return { error: "memoryMb must be a whole number from 512 to 16384" };
-  return { spec: { args, disc, ...o.derived !== void 0 ? { derived: o.derived } : {}, ...o.licence !== void 0 ? { licence: o.licence } : {}, ...o.stage !== void 0 ? { stage: o.stage } : {}, ...o.modPatch !== void 0 ? { modPatch: o.modPatch } : {}, base, ...o.folders !== void 0 ? { folders: o.folders } : {}, ...o.children !== void 0 ? { children: o.children } : {}, ...o.wholeBuild === true ? { wholeBuild: true } : {}, ...o.appDlls === true ? { appDlls: true } : {}, embed, controllers: o.controllers === "mirror" ? "mirror" : "none", net: o.net === "internet" || o.net === "yougame" ? o.net : "none", ...o.direct === true ? { direct: true } : {}, memoryMb, ...discs && Object.keys(discs).length ? { discs } : {} } };
+  return { spec: { args, disc, ...o.derived !== void 0 ? { derived: o.derived } : {}, ...o.licence !== void 0 ? { licence: o.licence } : {}, ...o.stage !== void 0 ? { stage: o.stage } : {}, ...o.modPatch !== void 0 ? { modPatch: o.modPatch } : {}, base, ...o.folders !== void 0 ? { folders: o.folders } : {}, ...o.children !== void 0 ? { children: o.children } : {}, ...o.wholeBuild === true ? { wholeBuild: true } : {}, ...o.appDlls === true ? { appDlls: true } : {}, embed, controllers: o.controllers === "mirror" ? "mirror" : "none", net: o.net === "internet" || o.net === "yougame" ? o.net : "none", ...o.direct === true ? { direct: true } : {}, memoryMb, ...discs && Object.keys(discs).length ? { discs } : {}, ...discFileLists ? { discFileLists } : {} } };
 }
-var APP_PARSE_TOKENS = `${DIRECT_UA_TOKEN} ${STEAM_BASE_UA_TOKEN} ${NATIVE_KNOBS_UA_TOKEN} ${MOD_PATCH_7Z_UA_TOKEN} ${MOD_AUTHOR_PAGE_UA_TOKEN} ${EXTERNAL_BUILD_UA_TOKEN} ${MULTI_DISC_UA_TOKEN}`;
+var APP_PARSE_TOKENS = `${DIRECT_UA_TOKEN} ${STEAM_BASE_UA_TOKEN} ${NATIVE_KNOBS_UA_TOKEN} ${MOD_PATCH_7Z_UA_TOKEN} ${MOD_AUTHOR_PAGE_UA_TOKEN} ${EXTERNAL_BUILD_UA_TOKEN} ${EXTERNAL_MAC_UA_TOKEN} ${MULTI_DISC_UA_TOKEN} ${HOSTED_ROM_UA_TOKEN} ${DISC_FILES_UA_TOKEN} ${DISC_FILES_2_UA_TOKEN} ${OWN_COPY_STAGE_UA_TOKEN}`;
 
 // src/lib/native-spec-check.ts
 function specNameFor(entry) {
@@ -680,11 +714,11 @@ function checkNativeSpec(text, name = LAUNCH_SPEC_FILE) {
   const parsed = parseLaunchSpec(text, APP_PARSE_TOKENS);
   if ("error" in parsed)
     warnings.push(`Warning: the desktop app will refuse ${name} at Play: ${parsed.error}.`);
-  if (o && o.net === void 0)
-    warnings.push(
-      `Warning: ${name} has no "net", so the game runs offline (no network at all). Add "net": "yougame" for YouGame's online features, or "net": "internet" if it talks to its own servers.`
-    );
+  if (o && o.net === void 0) warnings.push(`Warning: ${noNetMessage(name)}`);
   return { warnings };
+}
+function noNetMessage(name = LAUNCH_SPEC_FILE) {
+  return `${name} has no "net", so the game runs offline (no network at all). Add "net": "yougame" for YouGame's online features, or "net": "internet" if it talks to its own servers.`;
 }
 
 // src/lib/source-git.ts
@@ -894,6 +928,7 @@ async function uploadNative(input, {
   sourceUrl,
   sourceCommit,
   version,
+  note,
   from,
   reuse = true,
   site = process.env.YOUGAME_URL || "https://yougame.co",
@@ -904,7 +939,7 @@ async function uploadNative(input, {
 } = {}) {
   if (!token)
     throw new Error(
-      teamBranch !== void 0 ? "Set YOUGAME_API_KEY (a full key) to upload a team branch or proposed build." : "Set YOUGAME_NATIVE_TOKEN from native_upload_token. YOUGAME_API_KEY is accepted only with --team-branch."
+      teamBranch !== void 0 ? "Set YOUGAME_API_KEY (a full key, or a build key for a proposed build) to upload a team branch or proposed build." : "Set YOUGAME_NATIVE_TOKEN from native_upload_token. YOUGAME_API_KEY is accepted only with --team-branch."
     );
   if (!slug) throw new Error("Pass --slug for the listing.");
   if (!Object.hasOwn(PLATFORM_NAMES, platform))
@@ -921,6 +956,9 @@ async function uploadNative(input, {
     throw new Error("--version goes with --team-branch.");
   if (version !== void 0 && !NATIVE_VERSION_RE.test(version))
     throw new Error("--version takes letters, digits and . + _ - (up to 40).");
+  if (note !== void 0 && teamBranch === void 0) throw new Error("--note goes with --team-branch.");
+  if (note !== void 0 && (typeof note !== "string" || note.trim().length > 2e3))
+    throw new Error("--note takes plain text, up to 2000 characters.");
   if (from !== void 0 && (!reuse || !/^[0-9a-f-]{36}$/i.test(String(from))))
     throw new Error("--from takes an earlier build's id, without --no-reuse.");
   let sourceFile = null;
@@ -990,6 +1028,7 @@ async function uploadNative(input, {
     entry,
     ...teamBranch !== void 0 ? { teamBranch: teamBranch.trim() } : {},
     ...version !== void 0 ? { version } : {},
+    ...note !== void 0 && note.trim() ? { note: note.trim() } : {},
     ...sourceFile ? { sourceBytes: sourceFile.size } : {},
     ...sourceUrl !== void 0 ? { sourceUrl, sourceCommit } : {},
     ...reuse ? { reuse: true, ...from !== void 0 ? { from } : {} } : {}
@@ -1118,18 +1157,25 @@ async function uploadNative(input, {
       sha256,
       ...sourceUpload ? { source: sourceUpload } : {}
     });
-    const note = typeof start.note === "string" ? `. ${start.note}` : "";
+    const who = typeof start.note === "string" ? `. ${start.note}` : "";
+    const used = result.build?.version ?? start.build?.version;
+    const v = typeof used === "string" && used ? ` (version ${used})` : "";
     return {
       id: result.build.id,
       ...reusedBytes ? { reusedBytes, bytes: file.size } : {},
       ...fromRefused ? { fromRefused: true } : {},
-      message: teamBranch !== void 0 ? `ready on the team branch "${teamBranch.trim()}"${note}` : start.requestBranch === true ? start.requestVisible === false ? "uploaded as a test build, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change" : "ready as a test build: signed-in players can try it now. The live game doesn't change until its owner accepts it" : "waiting for you on Manage \u2192 Desktop builds"
+      message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : `the listing's own build${v}: waiting for you on Manage \u2192 Desktop builds`
     };
   } catch (error) {
     await json("abort", { build: start.build?.id, uploadId: start.uploadId }).catch(() => {
     });
     throw error;
   }
+}
+function byteSize(bytes) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
@@ -1147,6 +1193,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         "--source-url": "sourceUrl",
         "--source-commit": "sourceCommit",
         "--version": "version",
+        "--note": "note",
         "--from": "from"
       }[args[i]];
       if (args[i] === "--no-reuse") options.reuse = false;
@@ -1154,7 +1201,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       else if (!args[i].startsWith("--") && !input) input = args[i];
       else
         throw new Error(
-          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] <build.zip | build-folder>"
+          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] <build.zip | build-folder>"
         );
     }
     if (!input)
@@ -1169,7 +1216,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       );
     if (result.reusedBytes)
       console.log(
-        `Reused ${(result.reusedBytes / 1024 ** 2).toFixed(1)} MB of ${(result.bytes / 1024 ** 2).toFixed(1)} MB from an earlier build; sent the rest.`
+        `Reused ${byteSize(result.reusedBytes)} of ${byteSize(result.bytes)} from an earlier build; sent the rest.`
       );
   } catch (error) {
     console.error(error.message);
@@ -1177,6 +1224,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   }
 }
 export {
+  byteSize,
   sendInOrder,
   uploadNative
 };
