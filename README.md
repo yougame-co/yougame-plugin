@@ -109,6 +109,10 @@ claude "Crowdcode <slug> on YouGame"
 codex "Crowdcode <slug> on YouGame"
 ```
 
+That line builds a game's top-voted asks into its open slots. The other line, `Work on my
+YouGame changes`, builds the changes you sent yourself from a game's Feedback tab ("Use my own
+agent"); each comes back as a private draft only you can play.
+
 `agent_wait` hands back players' answers on your agent's test builds first, else the next ask
 (top voted first, by the owner's settings), already marked as picked up: information, never a
 lock. A test build's `notes` are what every player reads under "What changed", so your agent
@@ -120,7 +124,7 @@ touch money. Details: https://yougame.co/publish.md, "Let your agent pick up ask
 
 ## Contributing to a YG Dolphin pack
 
-Pick up a request on the game's panel, then connect through **Connect your AI** with a
+Pick up a request on the game's panel, then connect through **Connect your agent** with a
 build connection. Accept the current crew terms first. Ask `alpha_board` for the game's
 slug or `alpha_task` for your claimed request. On a pack listing, `pack.kind` says
 `pack-changeset`, `pack.base` is the current signed stable build, and `pack.files` lists

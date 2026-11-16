@@ -189,6 +189,15 @@ one short message:
 - what you added (leaderboard or not, and why), and anything `check_build` warned about but
   you left alone.
 
+### Entering the OpenGame jam
+
+A game headed for OpenGame's jam (opengame.io; entries are uploaded to and played on that site) is
+built and tested on YouGame first, and the same build folder is then zipped for OpenGame. The
+publish guide's "Entering the OpenGame jam" has the steps: what the SDK does on another site, when to
+submit a copy without it, and how the game page's version history serves as the record of when the
+game was made. YouGame is not affiliated with OpenGame: have the creator read its rules before
+submitting.
+
 ## 6. Fill in the submission, when the creator is signed in
 
 If the YouGame MCP connection is signed in (the server asks for it when the MCP connects:
