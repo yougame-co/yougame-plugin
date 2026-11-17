@@ -1071,7 +1071,7 @@ async function uploadNative(input, {
     ...sourceUrl !== void 0 ? { sourceUrl, sourceCommit } : {},
     ...reuse ? { reuse: true, ...from !== void 0 ? { from } : {} } : {}
   });
-  let runs = [], reusedBytes = 0, mismatches = 0, refusals = 0;
+  let runs = [], reusedBytes = 0, mismatches = 0, refusals = 0, big = 0;
   const listing = start.reuse;
   const fromRefused = reuse && from !== void 0 && listing?.from !== from;
   if (reuse && listing && typeof listing.from === "string" && Array.isArray(listing.entries)) {
@@ -1079,6 +1079,7 @@ async function uploadNative(input, {
     const local = [];
     for (const e of entries) {
       const z = e.zip, o = old.get(e.name);
+      if (!e.dir && z && z.compressed >= REUSE_MIN_ENTRY) big++;
       if (e.dir || !z || z.compressed < REUSE_MIN_ENTRY || !o || o.c !== z.crc || o.z !== z.compressed || o.m !== z.method)
         continue;
       const header = Buffer.from(await file.slice(z.offset, z.offset + 30).arrayBuffer());
@@ -1093,6 +1094,7 @@ async function uploadNative(input, {
     }
     runs = copyRuns(local, listing);
   }
+  const planned = runs.length;
   async function uploadParts(blob, uploadId, object) {
     const hash = createHash("sha256");
     const sendPart = async (part, offset, end, bytes) => {
@@ -1198,11 +1200,14 @@ async function uploadNative(input, {
     });
     const who = typeof start.note === "string" ? `. ${start.note}` : "";
     const used = result.build?.version ?? start.build?.version;
+    const noReuse = from !== void 0 && !fromRefused && !reusedBytes ? !Array.isArray(listing?.entries) ? "the site didn't list its files this time" : planned ? "the site didn't copy them this time" : big ? `none of this zip's files of ${byteSize(REUSE_MIN_ENTRY)} or more is unchanged from it` : `every file in this zip is under ${byteSize(REUSE_MIN_ENTRY)}, too small to copy` : null;
     const v = typeof used === "string" && used ? ` (version ${used})` : "";
     return {
       id: result.build.id,
       ...reusedBytes ? { reusedBytes, bytes: file.size } : {},
       ...fromRefused ? { fromRefused: true } : {},
+      ...Array.isArray(result.replaced) && result.replaced.length ? { replaced: result.replaced } : {},
+      ...noReuse ? { noReuse } : {},
       message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : `the listing's own build${v}: waiting for you on Manage \u2192 Desktop builds`
     };
   } catch (error) {
@@ -1241,7 +1246,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       else if (!args[i].startsWith("--") && !input) input = args[i];
       else
         throw new Error(
-          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build-folder>"
+          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build-folder>\nA Linux build needs yougame-native.json beside its program at the top of the zip (publish.md, Desktop builds)."
         );
     }
     if (!input)
@@ -1254,6 +1259,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       console.log(
         "Reuse of the earlier build you named wasn't available this time, so every byte was sent."
       );
+    if (result.noReuse) console.log(`Nothing reused from the earlier build: ${result.noReuse}, so every byte was sent.`);
+    for (const old of result.replaced ?? [])
+      console.log(`Replaced build ${old} with ${result.id} on this test-build branch (the old id no longer opens).`);
     if (result.reusedBytes)
       console.log(
         `Reused ${byteSize(result.reusedBytes)} of ${byteSize(result.bytes)} from an earlier build; sent the rest.`
