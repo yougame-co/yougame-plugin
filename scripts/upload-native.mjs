@@ -982,10 +982,8 @@ async function uploadNative(input, {
     throw new Error("Pass --source-url and --source-commit together.");
   if ((sourceUrl !== void 0 || source !== void 0) && teamBranch === void 0)
     throw new Error("--source, --source-url and --source-commit go with --team-branch.");
-  if (version !== void 0 && teamBranch === void 0)
-    throw new Error("--version goes with --team-branch.");
   if (version !== void 0 && !NATIVE_VERSION_RE.test(version))
-    throw new Error("--version takes letters, digits and . + _ - (up to 40).");
+    throw new Error("--version starts with a letter or digit, then letters, digits and . + _ - (up to 40 characters), e.g. 1.2 or v2.0.1.");
   if (note !== void 0 && teamBranch === void 0) throw new Error("--note goes with --team-branch.");
   if (note !== void 0 && (typeof note !== "string" || note.trim().length > 2e3))
     throw new Error("--note takes plain text, up to 2000 characters.");
@@ -1246,7 +1244,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       else if (!args[i].startsWith("--") && !input) input = args[i];
       else
         throw new Error(
-          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build-folder>\nA Linux build needs yougame-native.json beside its program at the top of the zip (publish.md, Desktop builds)."
+          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--version <label>] [--team-branch <name> [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build-folder>\nA Linux build needs yougame-native.json beside its program at the top of the zip (publish.md, Desktop builds)."
         );
     }
     if (!input)
