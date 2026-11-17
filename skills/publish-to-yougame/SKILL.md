@@ -191,12 +191,13 @@ one short message:
 
 ### Entering the OpenGame jam
 
-A game headed for OpenGame's jam (opengame.io; entries are uploaded to and played on that site) is
-built and tested on YouGame first, and the same build folder is then zipped for OpenGame. The
-publish guide's "Entering the OpenGame jam" has the steps: what the SDK does on another site, when to
-submit a copy without it, and how the game page's version history serves as the record of when the
-game was made. YouGame is not affiliated with OpenGame: have the creator read its rules before
-submitting.
+A game headed for OpenGame's jam (opengame.io; November 18 to December 18, 2026; entries are deployed
+to and played on that site) is built with players on YouGame, and a copy without the YouGame SDK is
+entered there. Its rules matter before the first line of code: the game must be started on or after
+November 18, by one person, as their own work, and the entered copy may not carry a sign-in, a portal
+SDK, frames from other sites or tips. The publish guide's "Entering the OpenGame jam" has the steps
+and what the game page's version history is good for. YouGame is not affiliated with OpenGame: have
+the creator read https://opengame.io/rules before starting.
 
 ## 6. Fill in the submission, when the creator is signed in
 
