@@ -918,6 +918,35 @@ async function sendInOrder(count, limit, read, send) {
   if (failed) throw failed;
   return results;
 }
+async function fileManifest(file, entries) {
+  const { crc32: crc322 } = await import("node:zlib");
+  const files = [], seen = /* @__PURE__ */ new Set();
+  for (const e of entries) {
+    if (e.dir) continue;
+    const z = e.zip;
+    if (!z || z.method !== 0 && z.method !== 8) throw new Error(`${e.name}: compression method ${z?.method}`);
+    if (seen.has(e.name)) throw new Error(`${e.name}: named twice`);
+    seen.add(e.name);
+    const header = Buffer.from(await file.slice(z.offset, z.offset + 30).arrayBuffer());
+    if (header.length !== 30 || header.readUInt32LE(0) !== 67324752) throw new Error(`${e.name}: no local header`);
+    const start = z.offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
+    if (start + z.compressed > file.size) throw new Error(`${e.name}: data runs past the end`);
+    let stream = file.slice(start, start + z.compressed).stream();
+    if (z.method === 8) stream = stream.pipeThrough(new DecompressionStream("deflate-raw"));
+    const hash = createHash("sha256");
+    let size = 0, crc = 0;
+    for await (const chunk of stream) {
+      size += chunk.byteLength;
+      if (size > e.bytes) throw new Error(`${e.name}: longer than its directory size`);
+      hash.update(chunk);
+      if (crc322) crc = crc322(chunk, crc);
+    }
+    if (size !== e.bytes) throw new Error(`${e.name}: shorter than its directory size`);
+    if (crc322 && crc >>> 0 !== z.crc >>> 0) throw new Error(`${e.name}: CRC-32 differs from the directory`);
+    files.push({ path: e.name, size, crc32: z.crc >>> 0, sha256: hash.digest("hex") });
+  }
+  return files;
+}
 async function uploadNative(input, {
   slug,
   entry,
@@ -931,6 +960,7 @@ async function uploadNative(input, {
   note,
   from,
   reuse = true,
+  manifest = true,
   site = process.env.YOUGAME_URL || "https://yougame.co",
   token = teamBranch !== void 0 ? process.env.YOUGAME_API_KEY || process.env.YOUGAME_NATIVE_TOKEN : process.env.YOUGAME_NATIVE_TOKEN,
   fetch: request = fetch,
@@ -1006,6 +1036,14 @@ async function uploadNative(input, {
     } : checkNativeSpec(text, specName);
     if ("refuse" in checked) throw new Error(checked.refuse);
     for (const warning of checked.warnings) warn(warning);
+  }
+  let files = null;
+  if (manifest) {
+    try {
+      files = await fileManifest(file, entries);
+    } catch (error) {
+      warn(`Warning: no per-file manifest for this build (${error.message}); it uploads without one.`);
+    }
   }
   const headers = { authorization: `Bearer ${token}` };
   async function json(route, body) {
@@ -1155,7 +1193,8 @@ async function uploadNative(input, {
       uploadId: start.uploadId,
       parts,
       sha256,
-      ...sourceUpload ? { source: sourceUpload } : {}
+      ...sourceUpload ? { source: sourceUpload } : {},
+      ...files ? { files } : {}
     });
     const who = typeof start.note === "string" ? `. ${start.note}` : "";
     const used = result.build?.version ?? start.build?.version;
@@ -1197,11 +1236,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         "--from": "from"
       }[args[i]];
       if (args[i] === "--no-reuse") options.reuse = false;
+      else if (args[i] === "--no-manifest") options.manifest = false;
       else if (flag && args[i + 1] && !args[i + 1].startsWith("--")) options[flag] = args[++i];
       else if (!args[i].startsWith("--") && !input) input = args[i];
       else
         throw new Error(
-          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] <build.zip | build-folder>"
+          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--team-branch <name> [--version <label>] [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build-folder>"
         );
     }
     if (!input)
@@ -1225,6 +1265,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 }
 export {
   byteSize,
+  fileManifest,
   sendInOrder,
   uploadNative
 };
