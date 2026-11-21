@@ -330,7 +330,7 @@ var IAP_CENTS = [599, 1299, 2499, 5999, 12499];
 var IAP_PACKS = GOLD_PACKS.map((p, i) => ({ productId: `co.yougame.gold.${p.gold}`, gold: p.gold, cents: IAP_CENTS[i], webCents: p.cents }));
 var WEB_SAVING_PERCENT = Math.min(...IAP_PACKS.map((p) => Math.floor((1 - p.webCents / p.cents) * 100)));
 
-// node_modules/@opennextjs/cloudflare/dist/api/cloudflare-context.js
+// ../../release-poll/web/node_modules/@opennextjs/cloudflare/dist/api/cloudflare-context.js
 var cloudflareContextSymbol = Symbol.for("__cloudflare-context__");
 
 // src/lib/engine-servers.ts
@@ -416,15 +416,20 @@ var DESKTOP_NOT_PACKAGE = "desktop and package cannot be combined: a desktop lis
 // src/lib/upload-files.ts
 var REUSE_BATCH_FILES = 25;
 var REUSE_BATCH_BYTES = 1024 * 1024 * 1024;
+var REUSE_HELPER_FILES = 3;
+var REUSE_HELPER_BYTES = 64 * 1024 * 1024;
+var REUSE_PARALLEL = 8;
 function usesParts(size) {
   return size > MAX_FILE_BYTES;
 }
-function reuseBatches(files) {
+function reuseBatches(files, { maxFiles = REUSE_BATCH_FILES, maxBytes = REUSE_BATCH_BYTES } = {}) {
+  maxFiles = Math.max(1, Math.min(maxFiles, REUSE_BATCH_FILES));
+  maxBytes = Math.min(maxBytes, REUSE_BATCH_BYTES);
   const batches = [];
   let batch = [];
   let bytes = 0;
   for (const file of files) {
-    if (batch.length && (batch.length >= REUSE_BATCH_FILES || bytes + file.size > REUSE_BATCH_BYTES)) {
+    if (batch.length && (batch.length >= maxFiles || bytes + file.size > maxBytes)) {
       batches.push(batch);
       batch = [];
       bytes = 0;
@@ -469,6 +474,20 @@ function validateUploadFiles(value, opts = {}) {
   if (!seen.has("index.html") && !pkg) return { error: "Build must contain index.html at the top level. A ROM mod is one .ips, .ups, .bps or .xdelta file and nothing else; a cosmetic's package is declared with package: true." };
   if (total > MAX_UPLOAD_BYTES) return { error: "Build is over 5 GB unzipped" };
   return { files, total, package: pkg, desktop: false };
+}
+
+// src/lib/upload-stats.ts
+function sizeText(bytes) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+function uploadSummary(s) {
+  const total = s.sentBytes + s.reusedBytes;
+  const reused = s.reusedBytes > 0 ? `, reused ${sizeText(s.reusedBytes)} (${Math.round(s.reusedBytes / total * 100)}%)` : ", reused nothing";
+  const seconds = s.seconds < 10 ? s.seconds.toFixed(1) : String(Math.round(s.seconds));
+  return `Sent ${sizeText(s.sentBytes)}${reused}, ${s.playable === false ? "uploaded" : "playable"} in ${seconds} s`;
 }
 
 // scripts/upload-build.mjs
@@ -732,10 +751,11 @@ async function uploadBuild(directory, { token = process.env.YOUGAME_UPLOAD_TOKEN
     await inParallel(files.filter((file) => !usesParts(file.size)), 4, async (file) => {
       file.sha256 = await sha256Of(file.local);
     });
+    const startedAt = Date.now();
     const start = await json("/api/upload/start", { files: files.map(({ path, size }) => ({ path, size })), ...pkg ? { package: true } : {}, ...from ? { reuseFrom: from } : {} });
     const reused = /* @__PURE__ */ new Set();
     if (start.reuse) {
-      await inParallel(reuseBatches(files.filter((file) => !usesParts(file.size))), 4, async (batch) => {
+      await inParallel(reuseBatches(files.filter((file) => !usesParts(file.size)), { maxFiles: REUSE_HELPER_FILES, maxBytes: REUSE_HELPER_BYTES }), REUSE_PARALLEL, async (batch) => {
         const answer = await json("/api/upload/reuse", { id: start.uploadId, files: batch.map(({ path, sha256 }) => ({ path, sha256 })) }).catch(() => ({ reused: [] }));
         for (const path of answer.reused) reused.add(path);
       });
@@ -768,6 +788,8 @@ async function uploadBuild(directory, { token = process.env.YOUGAME_UPLOAD_TOKEN
       }
     });
     const result = await json("/api/upload/complete", { uploadId: start.uploadId });
+    const stats = result.uploadStats ?? { sentBytes: toSend.reduce((sum, file) => sum + file.size, 0), reusedBytes };
+    console.error(uploadSummary({ sentBytes: stats.sentBytes, reusedBytes: stats.reusedBytes, seconds: (Date.now() - startedAt) / 1e3 }));
     return reused.size ? { ...result, reusedFiles: reused.size, reusedBytes } : result;
   } finally {
     await rm(scratch, { recursive: true, force: true });

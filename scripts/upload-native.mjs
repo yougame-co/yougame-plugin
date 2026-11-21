@@ -829,6 +829,20 @@ var MAX_SHOT_BYTES = 8 * MB;
 var MAX_VIDEO_BYTES = 100 * MB;
 var IGNORED_ENTRY = /(^|\/)(__MACOSX|node_modules)(\/|$)|(^|\/)\.(?!\.?(?:$|\/))|(^|\/)Thumbs\.db$/i;
 
+// src/lib/upload-stats.ts
+function sizeText(bytes) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+function uploadSummary(s) {
+  const total = s.sentBytes + s.reusedBytes;
+  const reused = s.reusedBytes > 0 ? `, reused ${sizeText(s.reusedBytes)} (${Math.round(s.reusedBytes / total * 100)}%)` : ", reused nothing";
+  const seconds = s.seconds < 10 ? s.seconds.toFixed(1) : String(Math.round(s.seconds));
+  return `Sent ${sizeText(s.sentBytes)}${reused}, ${s.playable === false ? "uploaded" : "playable"} in ${seconds} s`;
+}
+
 // src/lib/native-reuse-plan.ts
 var REUSE_MIN_ENTRY = 16 * 1024;
 var REUSE_MAX_MISMATCHES = 2;
@@ -1324,6 +1338,7 @@ ${note.trim()}`.slice(0, 2e3) : carried;
     ...sourceUrl !== void 0 ? { sourceUrl, sourceCommit } : {},
     ...reuse ? { reuse: true, ...from !== void 0 ? { from } : {} } : {}
   };
+  const startedAt = Date.now();
   let start;
   try {
     start = await json("start", startBody);
@@ -1477,7 +1492,8 @@ ${note.trim()}`.slice(0, 2e3) : carried;
     const v = typeof used === "string" && used ? ` (version ${used})` : "";
     if (source !== void 0 && sourceOptional)
       sourceResult = result.source && typeof result.source.state === "string" ? { state: result.source.state, ...typeof result.source.reason === "string" ? { reason: result.source.reason } : {} } : sourceResult ?? { state: "skipped", reason: "site_refused" };
-    return {
+    const summary = uploadSummary({ sentBytes: file.size - reusedBytes, reusedBytes, seconds: (Date.now() - startedAt) / 1e3, playable: teamBranch !== void 0 || start.requestBranch === true || result.build?.state === "ready" });
+    const done = {
       id: result.build.id,
       ...sourceResult ? { source: sourceResult } : {},
       ...reusedBytes ? { reusedBytes, bytes: file.size } : {},
@@ -1488,6 +1504,8 @@ ${note.trim()}`.slice(0, 2e3) : carried;
       ...carried ? { specCarried: carried } : {},
       message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : result.build?.state === "ready" ? `the listing's own build${v}: live now${result.auto_live ? " (a GitHub release of a repo its owner linked goes live by itself)" : ""}` : `the listing's own build${v}: waiting for you on Manage \u2192 Desktop builds`
     };
+    Object.defineProperty(done, "summary", { value: summary });
+    return done;
   } catch (error) {
     await json("abort", { build: start.build?.id, uploadId: start.uploadId }).catch(() => {
     });
@@ -1556,6 +1574,7 @@ A test build's title and note say in plain words what changes and what to test, 
       console.log(
         `Reused ${byteSize(result.reusedBytes)} of ${byteSize(result.bytes)} from an earlier build; sent the rest.`
       );
+    console.log(result.summary);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

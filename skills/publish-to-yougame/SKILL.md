@@ -161,15 +161,28 @@ A game that uses the SDK but never reads `YouGame.ui` or a `--yg-ui-` variable g
 
 ## Building again
 
-When the game has a compile step, keep the loop short (publish.md, "Rebuild only what changed"):
-keep the engine's intermediate folders between builds, use a compile cache (`ccache` or `sccache`
-for C and C++, `sccache` for Rust), and build only the one OS and configuration you are about to
-test. Export into an empty folder and zip that, never the project root: `zip-build.sh` doesn't
-filter caches or object files out.
+When the game has a compile step, build through `build-keep.mjs` instead of calling the engine
+directly. It keeps the build tree and compile cache between runs in a cache home outside the repo
+(`~/.yougame/build-cache/`), so each build redoes only what changed:
 
-For your first build of a remix, or of a proposed build on someone's native listing, fetch the parent build's
-warm cache first: `node fetch-build-cache.mjs --slug <parent> --platform <os> --into <your cache folder>`
-(publish.md, "A head start from the parent build"). No cache kept is normal: build from scratch.
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/build-keep.mjs" run <project> --platform windows
+```
+
+It detects the engine (Unreal, Unity, Godot, CMake/C/C++, Rust, Vite/webpack), points ccache or
+sccache, the CMake build folder, cargo's target folder, Unreal's DerivedDataCache, Godot's
+`.godot` and Unity's `Library` at places that survive, builds only that one OS and configuration,
+and ends with a line saying how much the cache reused. Where it prints a placeholder (Unreal's
+engine path, Unity's editor), pass the filled-in command after `--`. Without `run` it only prints
+the environment and the command. It never installs anything: when it says "install sccache",
+tell the user.
+
+For your first build of a remix, or of a proposed build on someone's native listing, add
+`--parent <parent slug>` (with `YOUGAME_API_KEY` set): it fetches the parent build's warm cache
+once (publish.md, "A head start from the parent build"). No cache kept is normal.
+
+Upload the folder it exports into (or your engine's export folder), never the project root:
+`zip-build.sh` doesn't filter caches or object files out.
 
 ## 5. Zip it and hand it over
 
@@ -237,7 +250,7 @@ The reply has `uploadId`, `testUrl` (the build already runs there), the `verdict
 `report`. If the verdict is `broken`, fix the build and upload again.
 
 Then **fill in everything** with the MCP tool **`prepare_submission`**: the `uploadId`, a
-title, a short, casual description written from the game (two or three sentences a player would read: what it is and what makes it fun, no control lists or tech details), up to three genres, the controls,
+title, a short, casual description written from the game (two or three sentences a player would read: what it is and what makes it fun, no control lists or tech details), up to three genres and the controls (both optional: leave them out when you cannot tell),
 `play_mode`, `mobile` (only after you played the whole game by touch, at phone and iPad sizes, in and out of fullscreen: phones and iPads list only games with it on, and the check report's input kinds say whether the source can take touch at all; not sure, `false` and say why in `notes`; a ROM hack is the exception: it runs in YouGame's emulator, whose on-screen controller makes it playable on phones, so `true` unless it truly cannot be played that way), `mature`, `visibility` (`private`
 when the creator wants a private launch: testers only, nothing lists the game, invite links and
 the public launch on its Manage page; else leave it out), `score_kind` (`time` when

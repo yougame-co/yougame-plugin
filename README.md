@@ -95,6 +95,8 @@ A game talks to production (yougame.co) unless it opts into staging. One setting
 skills/           publish-to-yougame, yougame-sdk
 commands/         /yougame:publish, :check, :leaderboard, :saves, :phones, :controls, :multiplayer, :world
 scripts/          upload-build.mjs — streams a local build through the shared upload routes
+                  build-keep.mjs — keeps the build tree and compile cache between builds
+                  fetch-build-cache.mjs — the parent build's warm cache for a remix's first build
                   zip-build.sh — packages a build for manual browser upload
 github/           the "Publish to YouGame" GitHub Action: a published release ships the next version
 ```

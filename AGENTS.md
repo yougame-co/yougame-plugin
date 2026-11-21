@@ -37,9 +37,9 @@ friends) the YouGame workflow. Claude Code users get the same thing from the plu
    and untested flows separately.
 5. Zip the folder's *contents* (not the folder) and tell the creator the path. They upload
    it at https://yougame.co/upload; the listing needs a 16:9 thumbnail.
-   If the game has a compile step, keep the engine's intermediate folders and a compile cache
-   between builds and build only what you are about to test ("Rebuild only what changed" in
-   publish.md). Export into an empty folder and zip that: never a cache or object files.
+   If the game has a compile step, build with `node scripts/build-keep.mjs run <project>
+   --platform <os>`: it keeps the engine's intermediate folders and a compile cache between
+   builds and builds only that one target ("Rebuild only what changed" in publish.md). Export into an empty folder and zip that: never a cache or object files.
 6. When the YouGame MCP connection is signed in (it asks for that when it connects; the
    `upload_token` tool then gives a bearer token for the upload) or `YOUGAME_API_KEY` is set
    (made at https://yougame.co/account → Your agents → Connect with a key instead): run the plugin's
