@@ -881,8 +881,9 @@ var FOLDER_LIMIT_MESSAGE = "Folder uploads allow at most 1 GB total and 1.5 GB p
 var TAR_RE = /\.(?:tar\.gz|tgz)$/i;
 var ARCHIVE_RE = /\.(?:zip|tar\.gz|tgz)$/i;
 var ARCHIVE_LIMIT_MESSAGE = "Converted or merged archives allow at most 1 GB of files in total and 1.5 GB per file. Zip the build yourself and pass one .zip instead.";
-async function archive(paths) {
-  if (paths.length === 1) {
+async function archive(paths, { strip = null, add: extra = /* @__PURE__ */ new Map() } = {}) {
+  const rewrite = strip !== null || extra.size > 0;
+  if (paths.length === 1 && !rewrite) {
     const [path] = paths, target = await lstat(path);
     if (target.isFile() && /\.zip$/i.test(path))
       return { file: await openAsBlob(path), filename: basename(path) };
@@ -893,7 +894,9 @@ async function archive(paths) {
   for (const path of paths) {
     const target = await lstat(path);
     if (!target.isFile() || !ARCHIVE_RE.test(path))
-      throw new Error(`${basename(path)}: several inputs must each be a .zip, .tar.gz or .tgz file (pass a folder on its own).`);
+      throw new Error(
+        rewrite ? `${basename(path)}: --flatten and --default-spec take .zip, .tar.gz or .tgz files, not a folder.` : `${basename(path)}: several inputs must each be a .zip, .tar.gz or .tgz file (pass a folder on its own).`
+      );
   }
   const files = /* @__PURE__ */ new Map(), modes = /* @__PURE__ */ new Map(), hashes = /* @__PURE__ */ new Map();
   let filesIn = 0, total = 0, size = 22;
@@ -902,8 +905,13 @@ async function archive(paths) {
       throw new Error(ARCHIVE_LIMIT_MESSAGE);
   };
   const pathOf = (raw, from) => {
-    const name = normalizeZipName(raw).replace(/\/+$/, "");
+    let name = normalizeZipName(raw).replace(/\/+$/, "");
     if (!name || ARCHIVE_LITTER.test(name)) return null;
+    if (strip !== null) {
+      if (name === strip) return null;
+      if (!name.startsWith(`${strip}/`)) throw new Error(`${raw} in ${from} is outside ${strip}/; nothing was uploaded.`);
+      name = name.slice(strip.length + 1);
+    }
     if (!safeSourcePath(name)) throw new Error(`Unsafe build path in ${from}: ${raw}`);
     return name;
   };
@@ -952,6 +960,7 @@ async function archive(paths) {
       }
     }
   }
+  for (const [name, bytes] of extra) add(name, bytes, void 0, "--default-spec");
   if (!files.size) throw new Error(`No build files in ${paths.map((p) => basename(p)).join(", ")}.`);
   const file = new Blob([...sourceZipChunks(files, modes)]);
   const out = await listZip(file, 2e4, { requireComplete: true, locators: true, modes: true });
@@ -959,8 +968,41 @@ async function archive(paths) {
   const wrong = sums.length !== files.size ? "file count" : sums.find((f) => hashes.get(f.path) !== f.sha256)?.path ?? out.find((e) => !e.dir && modes.has(e.name) && (e.mode & 511) !== modes.get(e.name))?.name;
   if (wrong) throw new Error(`The converted zip doesn't match its inputs (${wrong}); nothing was uploaded.`);
   const executables = [...modes.values()].filter((mode) => mode & 73).length;
-  const parity = `${paths.length > 1 ? "Merged" : "Converted"} ${paths.map((p) => basename(p)).join(" + ")} into one zip: ${filesIn} files in, ${sums.length} out${filesIn > sums.length ? ` (${filesIn - sums.length} identical in more than one input)` : ""}, every file's SHA-256 matched${executables ? `, ${executables} kept their exec bit` : ""}.`;
+  const parity = `${paths.length > 1 ? "Merged" : rewrite && !TAR_RE.test(paths[0]) ? "Rewrote" : "Converted"} ${paths.map((p) => basename(p)).join(" + ")} into one zip: ${filesIn} files in, ${sums.length} out${filesIn > sums.length ? ` (${filesIn - sums.length} identical in more than one input)` : ""}, every file's SHA-256 matched${executables ? `, ${executables} kept their exec bit` : ""}${strip !== null ? `; dropped the top folder ${strip}/` : ""}${extra.size ? `; added ${[...extra.keys()].join(", ")}` : ""}.`;
   return { file, filename: `${basename(paths[0]).replace(ARCHIVE_RE, "")}.zip`, parity };
+}
+function loneTopFolder(entries) {
+  let top = null, inside = false;
+  for (const e of entries) {
+    const name = normalizeZipName(e.name).replace(/\/+$/, "");
+    if (!name || ARCHIVE_LITTER.test(name)) continue;
+    const slash = name.indexOf("/");
+    const seg = slash < 0 ? name : name.slice(0, slash);
+    if (slash < 0 && !e.dir) return null;
+    if (top !== null && seg !== top) return null;
+    top = seg;
+    if (slash >= 0) inside = true;
+  }
+  return top !== null && inside && !/\.app$/i.test(top) ? top : null;
+}
+function stripEntries(entries, strip) {
+  const out = [];
+  for (const e of entries) {
+    const name = normalizeZipName(e.name);
+    if (ARCHIVE_LITTER.test(name.replace(/\/+$/, "")) || !name.startsWith(`${strip}/`)) continue;
+    const rest = name.slice(strip.length + 1);
+    if (rest.replace(/\/+$/, "")) out.push({ ...e, name: rest });
+  }
+  return out;
+}
+function hintedEntry(entries, hint) {
+  if (typeof hint !== "string" || !hint) return null;
+  const want = normalizeZipName(hint);
+  const files = entries.filter((e) => !e.dir);
+  if (files.some((e) => e.name === want)) return want;
+  const base = want.slice(want.lastIndexOf("/") + 1);
+  const same = files.filter((e) => e.name === base || e.name.endsWith(`/${base}`));
+  return same.length === 1 ? same[0].name : null;
 }
 var TAR_KINDS = { 1: "hard link", 2: "symbolic link", 3: "device", 4: "device", 6: "named pipe", S: "sparse file" };
 function* tarEntries(tar, from = "the tar") {
@@ -1141,6 +1183,10 @@ async function uploadNative(input, {
   from,
   reuse = true,
   manifest = true,
+  flatten = false,
+  entryHint,
+  defaultSpec,
+  defaultSpecFrom,
   site = process.env.YOUGAME_URL || "https://yougame.co",
   token = teamBranch !== void 0 ? process.env.YOUGAME_API_KEY || process.env.YOUGAME_NATIVE_TOKEN : process.env.YOUGAME_NATIVE_TOKEN,
   fetch: request = fetch,
@@ -1158,11 +1204,11 @@ async function uploadNative(input, {
   if (!["x64", "arm64", "universal"].includes(arch))
     throw new Error("Pick x64, arm64 or universal.");
   if (teamBranch !== void 0 && (typeof teamBranch !== "string" || teamBranch.trim().length < 3 || teamBranch.trim().length > 60))
-    throw new Error("Name the team branch with 3\u201360 characters.");
+    throw new Error(`Name the team branch after what it changes for a player, 3\u201360 characters (e.g. "Fixes Fox's up-B landing lag"; never a commit hash or branch name).`);
   if (sourceUrl === void 0 !== (sourceCommit === void 0))
     throw new Error("Pass --source-url and --source-commit together.");
-  if ((sourceUrl !== void 0 || source !== void 0) && teamBranch === void 0)
-    throw new Error("--source, --source-url and --source-commit go with --team-branch.");
+  if (sourceUrl !== void 0 && teamBranch === void 0)
+    throw new Error("--source-url and --source-commit go with --team-branch.");
   if (version !== void 0 && !NATIVE_VERSION_RE.test(version))
     throw new Error("--version starts with a letter or digit, then letters, digits and . + _ - (up to 40 characters), e.g. 1.2 or v2.0.1.");
   if (note !== void 0 && teamBranch === void 0) throw new Error("--note goes with --team-branch.");
@@ -1185,22 +1231,46 @@ async function uploadNative(input, {
     throw new Error("Use HTTPS, or localhost for development.");
   const inputs = (Array.isArray(input) ? input : [input]).map((p) => resolve(p));
   if (!inputs.length) throw new Error("Pass a build.zip, .tar.gz or folder.");
-  const { file, filename, parity } = await archive(inputs);
-  if (parity) log(parity);
-  if (file.size < 1024 || file.size > 4 * 1024 ** 3)
-    throw new Error("Desktop build zips must be between 1 KB and 4 GB.");
-  const entries = await listZip(file, 2e4, { requireComplete: true, locators: true });
-  entry = entry == null ? guessEntry(entries, platform) : normalizeZipName(String(entry));
-  const present = platform === "macos" && /\.app$/i.test(entry ?? "") ? entries.some((e) => e.name.startsWith(`${entry}/`)) : entries.some((e) => !e.dir && e.name === entry);
+  let { file, filename, parity } = await archive(inputs);
+  let entries = await listZip(file, 2e4, { requireComplete: true, locators: true });
+  const rewritable = (await Promise.all(inputs.map((p) => lstat(p)))).every((t) => t.isFile());
+  const named = entry == null ? null : normalizeZipName(String(entry));
+  const strip = flatten && rewritable && !(named !== null && entries.some((e) => !e.dir && e.name === named)) ? loneTopFolder(entries) : null;
+  const view = strip !== null ? stripEntries(entries, strip) : entries;
+  entry = entry == null ? hintedEntry(view, entryHint) ?? guessEntry(view, platform) : normalizeZipName(String(entry));
+  const present = platform === "macos" && /\.app$/i.test(entry ?? "") ? view.some((e) => e.name.startsWith(`${entry}/`)) : view.some((e) => !e.dir && e.name === entry);
   if (!entry || !present || entry.includes("..") || entry.startsWith("/"))
     throw new Error(
       `Could not find the ${PLATFORM_NAMES[platform]} entry; pass --entry with its path inside the zip.`
     );
-  const specName = specNameFor(entry), spec = entries.find((e) => !e.dir && e.name === specName);
+  const specName = specNameFor(entry);
+  let spec = view.find((e) => !e.dir && e.name === specName);
   if (platform === "linux" && entry.includes("/"))
     throw new Error(
       `Put the Linux program (${entry}) and yougame-native.json at the top of the zip, then run this again.`
     );
+  let carried = null;
+  const added = /* @__PURE__ */ new Map();
+  if (!spec && defaultSpec !== void 0 && rewritable) {
+    const target = await lstat(resolve(defaultSpec));
+    if (!target.isFile() || target.size < 1 || target.size > 64 * 1024)
+      throw new Error("--default-spec takes a yougame-native.json file of at most 64 KB.");
+    added.set(specName, await readFile(resolve(defaultSpec)));
+    carried = `Launch settings carried over from ${defaultSpecFrom ? String(defaultSpecFrom).slice(0, 80) : "the listing's current build"}; this release didn't include ${specName.slice(specName.lastIndexOf("/") + 1)}.`;
+    if (teamBranch !== void 0)
+      note = note !== void 0 && note.trim() ? `${carried}
+
+${note.trim()}`.slice(0, 2e3) : carried;
+  }
+  if (strip !== null || added.size) {
+    ({ file, filename, parity } = await archive(inputs, { strip, add: added }));
+    entries = await listZip(file, 2e4, { requireComplete: true, locators: true });
+    spec = entries.find((e) => !e.dir && e.name === specName);
+  }
+  if (parity) log(parity);
+  if (carried) log(carried);
+  if (file.size < 1024 || file.size > 4 * 1024 ** 3)
+    throw new Error("Desktop build zips must be between 1 KB and 4 GB.");
   if (!spec && platform === "linux" && teamBranch === void 0)
     throw new Error(
       `Add ${specName} beside ${entry} so the app can run it in its Linux sandbox, e.g. {"version": 1, "net": "internet"} (sdk.md lists every key), then run this again.`
@@ -1238,7 +1308,9 @@ async function uploadNative(input, {
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
     return result;
   }
-  const start = await json("start", {
+  const sourceOptional = teamBranch === void 0;
+  let sourceResult = null;
+  const startBody = {
     slug,
     platform,
     arch,
@@ -1251,7 +1323,18 @@ async function uploadNative(input, {
     ...sourceFile ? { sourceBytes: sourceFile.size } : {},
     ...sourceUrl !== void 0 ? { sourceUrl, sourceCommit } : {},
     ...reuse ? { reuse: true, ...from !== void 0 ? { from } : {} } : {}
-  });
+  };
+  let start;
+  try {
+    start = await json("start", startBody);
+  } catch (error) {
+    if (!sourceOptional || !sourceFile || !/source archive goes with a proposed build/i.test(error.message)) throw error;
+    warn("The site took no source archive with this build; uploading the build without it.");
+    sourceFile = null;
+    sourceResult = { state: "skipped", reason: "site_refused" };
+    delete startBody.sourceBytes;
+    start = await json("start", startBody);
+  }
   let runs = [], reusedBytes = 0, mismatches = 0, refusals = 0, big = 0;
   const listing = start.reuse;
   const fromRefused = reuse && from !== void 0 && listing?.from !== from;
@@ -1364,13 +1447,22 @@ async function uploadNative(input, {
   try {
     if (!start.build?.id || !start.uploadId || start.partBytes !== 64 * 1024 ** 2)
       throw new Error("Unexpected native upload parameters.");
-    if (sourceFile && typeof start.sourceUploadId !== "string")
-      throw new Error("Unexpected native upload parameters.");
+    if (sourceFile && typeof start.sourceUploadId !== "string") {
+      if (!sourceOptional) throw new Error("Unexpected native upload parameters.");
+      sourceFile = null;
+      sourceResult = { state: "skipped", reason: "site_refused" };
+    }
     const { parts, sha256 } = await uploadParts(file, start.uploadId);
-    const sourceUpload = sourceFile ? {
-      uploadId: start.sourceUploadId,
-      ...await uploadParts(sourceFile, start.sourceUploadId, "source")
-    } : null;
+    let sourceUpload = null;
+    if (sourceFile) {
+      try {
+        sourceUpload = { uploadId: start.sourceUploadId, ...await uploadParts(sourceFile, start.sourceUploadId, "source") };
+      } catch (error) {
+        if (!sourceOptional) throw error;
+        warn(`The source archive didn't upload (${error.message}); completing the build without it.`);
+        sourceResult = { state: "skipped", reason: "upload_failed" };
+      }
+    }
     const result = await json("complete", {
       build: start.build.id,
       uploadId: start.uploadId,
@@ -1383,14 +1475,18 @@ async function uploadNative(input, {
     const used = result.build?.version ?? start.build?.version;
     const noReuse = from !== void 0 && !fromRefused && !reusedBytes ? !Array.isArray(listing?.entries) ? "the site didn't list its files this time" : planned ? "the site didn't copy them this time" : big ? `none of this zip's files of ${byteSize(REUSE_MIN_ENTRY)} or more is unchanged from it` : `every file in this zip is under ${byteSize(REUSE_MIN_ENTRY)}, too small to copy` : null;
     const v = typeof used === "string" && used ? ` (version ${used})` : "";
+    if (source !== void 0 && sourceOptional)
+      sourceResult = result.source && typeof result.source.state === "string" ? { state: result.source.state, ...typeof result.source.reason === "string" ? { reason: result.source.reason } : {} } : sourceResult ?? { state: "skipped", reason: "site_refused" };
     return {
       id: result.build.id,
+      ...sourceResult ? { source: sourceResult } : {},
       ...reusedBytes ? { reusedBytes, bytes: file.size } : {},
       ...fromRefused ? { fromRefused: true } : {},
       ...Array.isArray(result.replaced) && result.replaced.length ? { replaced: result.replaced } : {},
       ...noReuse ? { noReuse } : {},
       ...parity ? { parity } : {},
-      message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : `the listing's own build${v}: waiting for you on Manage \u2192 Desktop builds`
+      ...carried ? { specCarried: carried } : {},
+      message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : result.build?.state === "ready" ? `the listing's own build${v}: live now${result.auto_live ? " (a GitHub release of a repo its owner linked goes live by itself)" : ""}` : `the listing's own build${v}: waiting for you on Manage \u2192 Desktop builds`
     };
   } catch (error) {
     await json("abort", { build: start.build?.id, uploadId: start.uploadId }).catch(() => {
@@ -1420,15 +1516,23 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         "--source-commit": "sourceCommit",
         "--version": "version",
         "--note": "note",
-        "--from": "from"
+        "--from": "from",
+        "--entry-hint": "entryHint",
+        "--default-spec": "defaultSpec",
+        "--default-spec-from": "defaultSpecFrom"
       }[args[i]];
       if (args[i] === "--no-reuse") options.reuse = false;
+      else if (args[i] === "--flatten") options.flatten = true;
       else if (args[i] === "--no-manifest") options.manifest = false;
       else if (flag && args[i + 1] && !args[i + 1].startsWith("--")) options[flag] = args[++i];
       else if (!args[i].startsWith("--")) input.push(args[i]);
       else
         throw new Error(
-          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--version <label>] [--team-branch <name> [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build.tar.gz | build-folder> [more .zip/.tar.gz to merge]\nRelease assets go in as published: a .tar.gz, or several archives (e.g. win64.zip compat-win64.zip), become one zip with every file's bytes and exec bits unchanged.\nA Linux build needs yougame-native.json beside its program at the top of the zip (publish.md, Desktop builds)."
+          `Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--version <label>] [--source <source.tar.gz>] [--team-branch "<what it changes for a player>" [--note "<what changed. What to test: 1) ... 2) ...>"] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] [--flatten] [--entry-hint <path>] [--default-spec <yougame-native.json> [--default-spec-from <label>]] <build.zip | build.tar.gz | build-folder> [more .zip/.tar.gz to merge]
+Release assets go in as published: a .tar.gz, or several archives (e.g. win64.zip compat-win64.zip), become one zip with every file's bytes and exec bits unchanged.
+A Linux build needs yougame-native.json beside its program at the top of the zip (publish.md, Desktop builds).
+A test build's title and note say in plain words what changes and what to test, never a commit hash or "main @ ..." (publish.md, Titles and descriptions for test builds).
+--flatten drops a top folder every file sits in; --entry-hint names the entry to use when the zip has it; --default-spec adds that launch spec when none sits beside the entry.`
         );
     }
     if (!input.length)
@@ -1437,6 +1541,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       );
     const result = await uploadNative(input, options);
     console.log(`${result.id}: ${result.message}`);
+    if (result.source)
+      console.log(
+        result.source.state === "attached" ? "Source archive: attached" : `Source archive not attached (${result.source.state}: ${String(result.source.reason ?? "").replace(/[()\n]/g, " ").slice(0, 240)}); the build is unaffected.`
+      );
     if (result.fromRefused)
       console.log(
         "Reuse of the earlier build you named wasn't available this time, so every byte was sent."
@@ -1456,6 +1564,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 export {
   byteSize,
   fileManifest,
+  hintedEntry,
+  loneTopFolder,
   sendInOrder,
   tarEntries,
   uploadNative
