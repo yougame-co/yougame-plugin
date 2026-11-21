@@ -144,6 +144,7 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
     throw notZip();
   const tailStart = Math.max(0, size - (EOCD_MIN + MAX_COMMENT));
   const tail = await readRange(file, tailStart, size);
+  const fromTail = (start, end) => Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= tailStart && end >= start && end <= size ? new DataView(tail.buffer.slice(tail.byteOffset + start - tailStart, tail.byteOffset + end - tailStart)) : null;
   let eocd = -1;
   for (let i = tail.byteLength - EOCD_MIN; i >= 0; i--) {
     if (tail.getUint32(i, true) !== SIG_EOCD) continue;
@@ -168,7 +169,7 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
       const locAt = tailStart + loc;
       const recAt = u64(tail, loc + 8);
       if (tail.getUint32(loc + 4, true) !== 0 || tail.getUint32(loc + 16, true) !== 1 || recAt + 56 !== locAt) throw notZip();
-      const rec = await readRange(file, recAt, locAt);
+      const rec = fromTail(recAt, locAt) ?? await readRange(file, recAt, locAt);
       if (rec.getUint32(0, true) !== SIG_EOCD64 || u64(rec, 4) !== 44 || rec.getUint32(16, true) !== 0 || rec.getUint32(20, true) !== 0 || u64(rec, 24) !== total || u64(rec, 32) !== total || u64(rec, 40) !== cdSize || u64(rec, 48) !== cdOffset)
         throw notZip();
       directoryEnd = recAt;
@@ -179,7 +180,7 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
     if (loc < 0 || tail.getUint32(loc, true) !== SIG_EOCD64_LOCATOR) throw notZip();
     const eocd64Offset = u64(tail, loc + 8);
     if (eocd64Offset + 56 > size) throw notZip();
-    const rec = await readRange(file, eocd64Offset, eocd64Offset + 56);
+    const rec = fromTail(eocd64Offset, eocd64Offset + 56) ?? await readRange(file, eocd64Offset, eocd64Offset + 56);
     if (rec.getUint32(0, true) !== SIG_EOCD64 || rec.getUint32(16, true) !== 0 || rec.getUint32(20, true) !== 0 || u64(rec, 24) !== u64(rec, 32))
       throw notZip();
     total = u64(rec, 32);
@@ -193,7 +194,7 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
   if (strict && (total > maxEntries || cdSize > 4 * 1024 * 1024 || cdOffset + cdSize !== directoryEnd))
     throw notZip();
   options.directory?.(cdOffset);
-  const cd = await readRange(file, cdOffset, cdOffset + cdSize);
+  const cd = fromTail(cdOffset, cdOffset + cdSize) ?? await readRange(file, cdOffset, cdOffset + cdSize);
   const bytes = new Uint8Array(cd.buffer);
   options.directoryBytes?.(bytes);
   const decoder = new TextDecoder("utf-8");
@@ -1302,14 +1303,10 @@ ${note.trim()}`.slice(0, 2e3) : carried;
     if ("refuse" in checked) throw new Error(checked.refuse);
     for (const warning of checked.warnings) warn(warning);
   }
-  let files = null;
-  if (manifest) {
-    try {
-      files = await fileManifest(file, entries);
-    } catch (error) {
-      warn(`Warning: no per-file manifest for this build (${error.message}); it uploads without one.`);
-    }
-  }
+  const filesPending = manifest ? fileManifest(file, entries).catch((error) => {
+    warn(`Warning: no per-file manifest for this build (${error.message}); it uploads without one.`);
+    return null;
+  }) : Promise.resolve(null);
   const headers = { authorization: `Bearer ${token}` };
   async function json(route, body) {
     const response = await request(new URL(`/api/native/upload/${route}`, base), {
@@ -1478,6 +1475,7 @@ ${note.trim()}`.slice(0, 2e3) : carried;
         sourceResult = { state: "skipped", reason: "upload_failed" };
       }
     }
+    const files = await filesPending;
     const result = await json("complete", {
       build: start.build.id,
       uploadId: start.uploadId,
