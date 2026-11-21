@@ -154,6 +154,9 @@ input plus `action: "open"`, or `action: "close"` with outcome `"closed"` and no
 
 ## Live verification before submission
 
+Hosted testing is not open yet: until the YouGame MCP lists `start_test_session`, skip this
+section, go on to `prepare_submission`, and say the build was only checked statically.
+
 After staging a build, call the YouGame MCP's `start_test_session` with `uploadId`,
 `listing` (at least the title and the intended board/play/phone settings), `players: 2`
 and `relationships: "friends"` (or `"strangers"` to test friend requests). It returns

@@ -2,11 +2,12 @@
 
 // scripts/upload-native.mjs
 import { openAsBlob } from "node:fs";
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { gunzipSync } from "node:zlib";
 
 // src/lib/unreal-layout.ts
 function safeParts(entry) {
@@ -254,6 +255,7 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
     if (strict && dir && uncompressed !== 0) throw notZip();
     if (name !== raw && name === "" && !dir) throw notZip();
     rawNames.push(raw);
+    const host = cd.getUint16(pos + 4, true) >>> 8;
     entries.push({
       name,
       dir,
@@ -269,7 +271,8 @@ async function listZip(file, maxEntries = 2e4, options = {}) {
           method,
           flags: cd.getUint16(pos + 8, true)
         }
-      } : {}
+      } : {},
+      ...options.modes && (host === 3 || host === 19) ? { mode: cd.getUint32(pos + 38, true) >>> 16 } : {}
     });
     pos = next;
   }
@@ -489,6 +492,8 @@ var NATIVE_KNOBS_UA_TOKEN = "YouGameNativeKnobs/1";
 var MULTI_DISC_UA_TOKEN = "YouGameMultiDisc/1";
 var DISC_FILES_UA_TOKEN = "YouGameDiscFiles/1";
 var DISC_FILES_2_UA_TOKEN = "YouGameDiscFiles/2";
+var WRITABLE_COPY_UA_TOKEN = "YouGameWritableCopy/1";
+var PREPARE_UA_TOKEN = "YouGamePrepare/1";
 var MAX_EXTRA_DISCS = 4;
 var DISC_SLOT = /^[a-z][a-z0-9-]{0,15}$/;
 var MAX_DISC_FILES = 256;
@@ -564,7 +569,7 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: `${LAUNCH_SPEC_FILE} must be an object` };
   const o = raw;
   const nativeKnobs = userAgent.split(/\s+/).includes(NATIVE_KNOBS_UA_TOKEN);
-  for (const k of Object.keys(o)) if (!["version", "args", "disc", "modPatch", "embed", "controllers", "net", "memoryMb", ...userAgent.split(/\s+/).includes(DIRECT_UA_TOKEN) ? ["direct"] : [], ...userAgent.split(/\s+/).includes(STEAM_BASE_UA_TOKEN) ? ["base", "folders", "children"] : [], ...nativeKnobs ? ["wholeBuild", "appDlls"] : [], ...userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN) ? ["stage", "derived", "licence"] : userAgent.split(/\s+/).includes(HOSTED_ROM_UA_TOKEN) ? ["stage"] : [], ...userAgent.split(/\s+/).includes(MULTI_DISC_UA_TOKEN) ? ["discs"] : []].includes(k)) return { error: `unknown field "${k}"` };
+  for (const k of Object.keys(o)) if (!["version", "args", "disc", "modPatch", "embed", "controllers", "net", "memoryMb", ...userAgent.split(/\s+/).includes(DIRECT_UA_TOKEN) ? ["direct"] : [], ...userAgent.split(/\s+/).includes(STEAM_BASE_UA_TOKEN) ? ["base", "folders", "children"] : [], ...nativeKnobs ? ["wholeBuild", "appDlls"] : [], ...userAgent.split(/\s+/).includes(WRITABLE_COPY_UA_TOKEN) ? ["writableCopy"] : [], ...userAgent.split(/\s+/).includes(PREPARE_UA_TOKEN) ? ["prepare"] : [], ...userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN) ? ["stage", "derived", "licence"] : userAgent.split(/\s+/).includes(HOSTED_ROM_UA_TOKEN) ? ["stage"] : [], ...userAgent.split(/\s+/).includes(MULTI_DISC_UA_TOKEN) ? ["discs"] : []].includes(k)) return { error: `unknown field "${k}"` };
   if (o.version !== 1) return { error: "version must be 1" };
   const args = o.args ?? [];
   if (!Array.isArray(args) || args.length > 64 || !args.every((a) => typeof a === "string" && a.length <= 1024 && !/[\0\r\n]/.test(a)))
@@ -676,6 +681,28 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (o.children !== void 0 && !base) return { error: "children needs base" };
   if (o.wholeBuild !== void 0 && o.wholeBuild !== true) return { error: "wholeBuild must be true" };
   if (o.appDlls !== void 0 && o.appDlls !== true) return { error: "appDlls must be true" };
+  if (o.writableCopy !== void 0 && o.writableCopy !== true) return { error: "writableCopy must be true" };
+  if (o.writableCopy === true && o.children !== void 0) return { error: "writableCopy cannot be used with children" };
+  let prepare;
+  if (o.prepare !== void 0) {
+    if (o.writableCopy !== true) return { error: "prepare needs writableCopy" };
+    const p = o.prepare;
+    if (!p || typeof p !== "object" || Array.isArray(p) || Object.keys(p).some((k) => k !== "exe" && k !== "args" && k !== "done"))
+      return { error: "prepare must be an object with exe, args and done" };
+    if (!stagePath(p.exe)) return { error: "prepare.exe must be a plain relative path inside the build" };
+    if (typeof p.done === "string" && (p.done === "" || p.done === "." || /[\\/]$/.test(p.done))) return { error: "prepare.done must be a file path, not a folder" };
+    if (!stagePath(p.done)) return { error: "prepare.done must be a plain relative path inside the build" };
+    if (p.done.toLowerCase() === p.exe.toLowerCase()) return { error: "prepare.done cannot be prepare.exe" };
+    const prepareArgs = p.args ?? [];
+    if (!Array.isArray(prepareArgs) || prepareArgs.length > 64 || !prepareArgs.every((a) => typeof a === "string" && a.length <= 1024 && !/[\0\r\n]/.test(a)))
+      return { error: "prepare.args must be at most 64 strings of at most 1024 characters" };
+    for (const a of prepareArgs) {
+      for (const m of a.matchAll(PLACEHOLDER)) if (m[1] !== "disc" || m[2] !== void 0) return { error: `prepare.args may only use {disc}, not {${m[0].slice(1, -1)}}` };
+      if (a.replace(PLACEHOLDER, "").includes("{")) return { error: `stray "{" in "${a}"` };
+      if (!disc && a.includes("{disc}")) return { error: '{disc} needs "disc": true' };
+    }
+    prepare = { exe: p.exe, args: prepareArgs, done: p.done };
+  }
   let embed = null;
   if (o.embed !== void 0) {
     const e = o.embed;
@@ -689,9 +716,9 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (o.direct === true && o.net !== "yougame") return { error: 'direct needs net "yougame"' };
   const memoryMb = o.memoryMb === void 0 ? 4096 : o.memoryMb;
   if (typeof memoryMb !== "number" || !Number.isInteger(memoryMb) || memoryMb < 512 || memoryMb > 16384) return { error: "memoryMb must be a whole number from 512 to 16384" };
-  return { spec: { args, disc, ...o.derived !== void 0 ? { derived: o.derived } : {}, ...o.licence !== void 0 ? { licence: o.licence } : {}, ...o.stage !== void 0 ? { stage: o.stage } : {}, ...o.modPatch !== void 0 ? { modPatch: o.modPatch } : {}, base, ...o.folders !== void 0 ? { folders: o.folders } : {}, ...o.children !== void 0 ? { children: o.children } : {}, ...o.wholeBuild === true ? { wholeBuild: true } : {}, ...o.appDlls === true ? { appDlls: true } : {}, embed, controllers: o.controllers === "mirror" ? "mirror" : "none", net: o.net === "internet" || o.net === "yougame" ? o.net : "none", ...o.direct === true ? { direct: true } : {}, memoryMb, ...discs && Object.keys(discs).length ? { discs } : {}, ...discFileLists ? { discFileLists } : {} } };
+  return { spec: { args, disc, ...o.derived !== void 0 ? { derived: o.derived } : {}, ...o.licence !== void 0 ? { licence: o.licence } : {}, ...o.stage !== void 0 ? { stage: o.stage } : {}, ...o.modPatch !== void 0 ? { modPatch: o.modPatch } : {}, base, ...o.folders !== void 0 ? { folders: o.folders } : {}, ...o.children !== void 0 ? { children: o.children } : {}, ...o.wholeBuild === true ? { wholeBuild: true } : {}, ...o.appDlls === true ? { appDlls: true } : {}, ...o.writableCopy === true ? { writableCopy: true } : {}, ...prepare ? { prepare } : {}, embed, controllers: o.controllers === "mirror" ? "mirror" : "none", net: o.net === "internet" || o.net === "yougame" ? o.net : "none", ...o.direct === true ? { direct: true } : {}, memoryMb, ...discs && Object.keys(discs).length ? { discs } : {}, ...discFileLists ? { discFileLists } : {} } };
 }
-var APP_PARSE_TOKENS = `${DIRECT_UA_TOKEN} ${STEAM_BASE_UA_TOKEN} ${NATIVE_KNOBS_UA_TOKEN} ${MOD_PATCH_7Z_UA_TOKEN} ${MOD_AUTHOR_PAGE_UA_TOKEN} ${EXTERNAL_BUILD_UA_TOKEN} ${EXTERNAL_MAC_UA_TOKEN} ${MULTI_DISC_UA_TOKEN} ${HOSTED_ROM_UA_TOKEN} ${DISC_FILES_UA_TOKEN} ${DISC_FILES_2_UA_TOKEN} ${OWN_COPY_STAGE_UA_TOKEN}`;
+var APP_PARSE_TOKENS = `${DIRECT_UA_TOKEN} ${STEAM_BASE_UA_TOKEN} ${NATIVE_KNOBS_UA_TOKEN} ${MOD_PATCH_7Z_UA_TOKEN} ${MOD_AUTHOR_PAGE_UA_TOKEN} ${EXTERNAL_BUILD_UA_TOKEN} ${EXTERNAL_MAC_UA_TOKEN} ${MULTI_DISC_UA_TOKEN} ${HOSTED_ROM_UA_TOKEN} ${DISC_FILES_UA_TOKEN} ${DISC_FILES_2_UA_TOKEN} ${OWN_COPY_STAGE_UA_TOKEN} ${WRITABLE_COPY_UA_TOKEN} ${PREPARE_UA_TOKEN}`;
 
 // src/lib/native-spec-check.ts
 function specNameFor(entry) {
@@ -735,7 +762,7 @@ function safeSourcePath(path) {
     (p) => !!p && p !== "." && p !== ".." && !/[ .]$/.test(p) && !/^\.git(?:[ .]|$)/i.test(p)
   );
 }
-function* sourceZipChunks(files) {
+function* sourceZipChunks(files, modes) {
   const directory = [];
   let offset = 0;
   if (files.size > 65535) throw new Error("Too many source files");
@@ -757,8 +784,9 @@ function* sourceZipChunks(files) {
     yield name;
     yield bytes;
     const c = Buffer.alloc(46);
+    const mode = modes?.get(path);
     c.writeUInt32LE(33639248);
-    c.writeUInt16LE(20, 4);
+    c.writeUInt16LE(mode === void 0 ? 20 : 3 << 8 | 20, 4);
     c.writeUInt16LE(20, 6);
     c.writeUInt16LE(2048, 8);
     c.writeUInt16LE(33, 14);
@@ -766,6 +794,7 @@ function* sourceZipChunks(files) {
     c.writeUInt32LE(bytes.length, 20);
     c.writeUInt32LE(bytes.length, 24);
     c.writeUInt16LE(name.length, 28);
+    if (mode !== void 0) c.writeUInt32LE((32768 | mode & 511) * 65536, 38);
     c.writeUInt32LE(offset, 42);
     directory.push(c, name);
     offset += h.length + name.length + bytes.length;
@@ -844,16 +873,167 @@ function formatSegments(segments) {
 }
 
 // scripts/upload-native.mjs
+var ARCHIVE_LITTER = /(^|\/)__MACOSX(\/|$)|(^|\/)\._[^/]*$/;
 var PARALLEL_PARTS = 4;
 var MAX_FOLDER_BYTES = 1024 ** 3;
 var MAX_FOLDER_FILE_BYTES = 1.5 * 1024 ** 3;
 var FOLDER_LIMIT_MESSAGE = "Folder uploads allow at most 1 GB total and 1.5 GB per file. Zip the build first and pass the .zip instead.";
-async function archive(path) {
-  const target = await lstat(path);
-  if (target.isFile() && /\.zip$/i.test(path))
-    return { file: await openAsBlob(path), filename: basename(path) };
-  if (!target.isDirectory())
-    throw new Error("Pass a .zip or a built folder. For Unreal, use a Shipping build.");
+var TAR_RE = /\.(?:tar\.gz|tgz)$/i;
+var ARCHIVE_RE = /\.(?:zip|tar\.gz|tgz)$/i;
+var ARCHIVE_LIMIT_MESSAGE = "Converted or merged archives allow at most 1 GB of files in total and 1.5 GB per file. Zip the build yourself and pass one .zip instead.";
+async function archive(paths) {
+  if (paths.length === 1) {
+    const [path] = paths, target = await lstat(path);
+    if (target.isFile() && /\.zip$/i.test(path))
+      return { file: await openAsBlob(path), filename: basename(path) };
+    if (target.isDirectory()) return folderZip(path);
+    if (!target.isFile() || !TAR_RE.test(path))
+      throw new Error("Pass a .zip, a .tar.gz or a built folder. For Unreal, use a Shipping build.");
+  }
+  for (const path of paths) {
+    const target = await lstat(path);
+    if (!target.isFile() || !ARCHIVE_RE.test(path))
+      throw new Error(`${basename(path)}: several inputs must each be a .zip, .tar.gz or .tgz file (pass a folder on its own).`);
+  }
+  const files = /* @__PURE__ */ new Map(), modes = /* @__PURE__ */ new Map(), hashes = /* @__PURE__ */ new Map();
+  let filesIn = 0, total = 0, size = 22;
+  const room = (name, bytes) => {
+    if (bytes > MAX_FOLDER_FILE_BYTES || !hashes.has(name) && total + bytes > MAX_FOLDER_BYTES)
+      throw new Error(ARCHIVE_LIMIT_MESSAGE);
+  };
+  const pathOf = (raw, from) => {
+    const name = normalizeZipName(raw).replace(/\/+$/, "");
+    if (!name || ARCHIVE_LITTER.test(name)) return null;
+    if (!safeSourcePath(name)) throw new Error(`Unsafe build path in ${from}: ${raw}`);
+    return name;
+  };
+  const add = (name, bytes, mode, from) => {
+    room(name, bytes.length);
+    filesIn++;
+    const sha = createHash("sha256").update(bytes).digest("hex"), had = hashes.get(name);
+    if (had !== void 0) {
+      if (had !== sha)
+        throw new Error(`${name} is in more than one input with different bytes (again in ${from}). Upload one of them, or remove the copy you don't want.`);
+      if (mode !== void 0) modes.set(name, (modes.get(name) ?? 0) | mode);
+      return;
+    }
+    if (files.size >= 2e4) throw new Error("Desktop builds are capped at 20000 files.");
+    total += bytes.length;
+    size += bytes.length + 76 + 2 * Buffer.byteLength(name);
+    if (size > 4294967295) throw new Error("The merged zip exceeds ZIP32; supply a .zip of at most 4 GB.");
+    files.set(name, bytes);
+    hashes.set(name, sha);
+    if (mode !== void 0) modes.set(name, mode);
+  };
+  for (const path of paths) {
+    const from = basename(path);
+    if (TAR_RE.test(path)) {
+      if ((await lstat(path)).size > MAX_FOLDER_BYTES) throw new Error(ARCHIVE_LIMIT_MESSAGE);
+      let tar;
+      try {
+        tar = gunzipSync(await readFile(path), { maxOutputLength: MAX_FOLDER_BYTES + 64 * 1024 ** 2 });
+      } catch (error) {
+        throw new Error(error?.code === "ERR_BUFFER_TOO_LARGE" || error instanceof RangeError ? ARCHIVE_LIMIT_MESSAGE : `${from}: not a readable .tar.gz (${error.message}).`);
+      }
+      for (const e of tarEntries(tar, from)) {
+        const name = pathOf(e.name, from);
+        if (name && !e.dir) add(name, e.bytes, e.mode, from);
+      }
+    } else {
+      const zip = await openAsBlob(path);
+      for (const e of await listZip(zip, 2e4, { requireComplete: true, modes: true })) {
+        const name = pathOf(e.name, from);
+        if (!name || e.dir) continue;
+        const type = (e.mode ?? 0) & 61440;
+        if (type !== 0 && type !== 32768) throw new Error(`Not a regular build file in ${from}: ${e.name}`);
+        room(name, e.bytes);
+        const read = await readZipEntry(zip, e, MAX_FOLDER_FILE_BYTES), bytes = Buffer.from(read.buffer, read.byteOffset, read.byteLength);
+        add(name, bytes, e.mode === void 0 || !type ? void 0 : e.mode & 511, from);
+      }
+    }
+  }
+  if (!files.size) throw new Error(`No build files in ${paths.map((p) => basename(p)).join(", ")}.`);
+  const file = new Blob([...sourceZipChunks(files, modes)]);
+  const out = await listZip(file, 2e4, { requireComplete: true, locators: true, modes: true });
+  const sums = await fileManifest(file, out);
+  const wrong = sums.length !== files.size ? "file count" : sums.find((f) => hashes.get(f.path) !== f.sha256)?.path ?? out.find((e) => !e.dir && modes.has(e.name) && (e.mode & 511) !== modes.get(e.name))?.name;
+  if (wrong) throw new Error(`The converted zip doesn't match its inputs (${wrong}); nothing was uploaded.`);
+  const executables = [...modes.values()].filter((mode) => mode & 73).length;
+  const parity = `${paths.length > 1 ? "Merged" : "Converted"} ${paths.map((p) => basename(p)).join(" + ")} into one zip: ${filesIn} files in, ${sums.length} out${filesIn > sums.length ? ` (${filesIn - sums.length} identical in more than one input)` : ""}, every file's SHA-256 matched${executables ? `, ${executables} kept their exec bit` : ""}.`;
+  return { file, filename: `${basename(paths[0]).replace(ARCHIVE_RE, "")}.zip`, parity };
+}
+var TAR_KINDS = { 1: "hard link", 2: "symbolic link", 3: "device", 4: "device", 6: "named pipe", S: "sparse file" };
+function* tarEntries(tar, from = "the tar") {
+  const bad = (why = "not a readable tar") => new Error(`${from}: ${why}.`);
+  const text = (b) => {
+    const end = b.indexOf(0);
+    return (end < 0 ? b : b.subarray(0, end)).toString("utf8");
+  };
+  const num = (b) => {
+    if (b[0] & 128) {
+      let n = b[0] & 127;
+      for (let i = 1; i < b.length; i++) n = n * 256 + b[i];
+      if (!Number.isSafeInteger(n)) throw bad();
+      return n;
+    }
+    const digits = b.toString("latin1").replace(/[\0 ]+$/, "").replace(/^ +/, "");
+    if (!/^[0-7]*$/.test(digits)) throw bad();
+    return digits ? parseInt(digits, 8) : 0;
+  };
+  let pax = {}, longName = null, at = 0;
+  while (at + 512 <= tar.length) {
+    const h = tar.subarray(at, at + 512);
+    if (h.every((b) => b === 0)) {
+      if (tar.subarray(at).some((b) => b !== 0)) throw bad("data after the end of the archive");
+      return;
+    }
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : h[i];
+    if (num(h.subarray(148, 156)) !== sum) throw bad("a header checksum doesn't match");
+    const type = h[156] ? String.fromCharCode(h[156]) : "0";
+    const meta = type === "x" || type === "g" || type === "L" || type === "K";
+    const size = !meta && pax.size !== void 0 ? pax.size : num(h.subarray(124, 136));
+    const start = at + 512, end = start + size;
+    if (end > tar.length) throw bad("it ends partway through a file");
+    const data = tar.subarray(start, end);
+    at = start + Math.ceil(size / 512) * 512;
+    if (type === "x") pax = paxRecords(data, bad);
+    else if (type === "L") longName = text(data);
+    else if (type === "g" || type === "K") {
+    } else {
+      const prefix = h.subarray(257, 263).toString("latin1") === "ustar\0" ? text(h.subarray(345, 500)) : "";
+      const short = text(h.subarray(0, 100));
+      const name = pax.path ?? longName ?? (prefix ? `${prefix}/${short}` : short);
+      pax = {};
+      longName = null;
+      if (type === "5" || (type === "0" || type === "7") && name.endsWith("/")) yield { name, dir: true };
+      else if (type === "0" || type === "7") yield { name, dir: false, mode: num(h.subarray(100, 108)) & 511, bytes: data };
+      else throw new Error(`${from}: ${name} is a ${TAR_KINDS[type] ?? "special entry"}; a build holds only regular files and folders.`);
+    }
+  }
+  if (at !== tar.length) throw bad("it ends partway through a header");
+}
+function paxRecords(data, bad) {
+  const out = {};
+  let at = 0;
+  while (at < data.length) {
+    const space = data.indexOf(32, at), len = space > at ? Number(data.subarray(at, space).toString("latin1")) : NaN;
+    if (!Number.isSafeInteger(len) || len <= space - at || at + len > data.length || data[at + len - 1] !== 10)
+      throw bad("a pax header is malformed");
+    const record = data.subarray(space + 1, at + len - 1).toString("utf8"), eq = record.indexOf("=");
+    if (eq < 1) throw bad("a pax header is malformed");
+    const key = record.slice(0, eq), value = record.slice(eq + 1);
+    if (key.startsWith("GNU.sparse.")) throw bad("sparse files aren't supported; re-pack without --sparse");
+    if (key === "path") out.path = value;
+    else if (key === "size") {
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw bad("a pax size is malformed");
+      out.size = Number(value);
+    }
+    at += len;
+  }
+  return out;
+}
+async function folderZip(path) {
   const files = /* @__PURE__ */ new Map();
   const paths = /* @__PURE__ */ new Map();
   let size = 22, total = 0;
@@ -965,7 +1145,8 @@ async function uploadNative(input, {
   token = teamBranch !== void 0 ? process.env.YOUGAME_API_KEY || process.env.YOUGAME_NATIVE_TOKEN : process.env.YOUGAME_NATIVE_TOKEN,
   fetch: request = fetch,
   sleep = delay,
-  warn = (message) => console.warn(message)
+  warn = (message) => console.warn(message),
+  log = (message) => console.log(message)
 } = {}) {
   if (!token)
     throw new Error(
@@ -1002,8 +1183,10 @@ async function uploadNative(input, {
   const base = new URL(site);
   if (base.username || base.password || base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname)))
     throw new Error("Use HTTPS, or localhost for development.");
-  const path = resolve(input);
-  const { file, filename } = await archive(path);
+  const inputs = (Array.isArray(input) ? input : [input]).map((p) => resolve(p));
+  if (!inputs.length) throw new Error("Pass a build.zip, .tar.gz or folder.");
+  const { file, filename, parity } = await archive(inputs);
+  if (parity) log(parity);
   if (file.size < 1024 || file.size > 4 * 1024 ** 3)
     throw new Error("Desktop build zips must be between 1 KB and 4 GB.");
   const entries = await listZip(file, 2e4, { requireComplete: true, locators: true });
@@ -1206,6 +1389,7 @@ async function uploadNative(input, {
       ...fromRefused ? { fromRefused: true } : {},
       ...Array.isArray(result.replaced) && result.replaced.length ? { replaced: result.replaced } : {},
       ...noReuse ? { noReuse } : {},
+      ...parity ? { parity } : {},
       message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : `the listing's own build${v}: waiting for you on Manage \u2192 Desktop builds`
     };
   } catch (error) {
@@ -1222,7 +1406,7 @@ function byteSize(bytes) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   const options = {};
-  let input;
+  const input = [];
   try {
     for (let i = 0; i < args.length; i++) {
       const flag = {
@@ -1241,15 +1425,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       if (args[i] === "--no-reuse") options.reuse = false;
       else if (args[i] === "--no-manifest") options.manifest = false;
       else if (flag && args[i + 1] && !args[i + 1].startsWith("--")) options[flag] = args[++i];
-      else if (!args[i].startsWith("--") && !input) input = args[i];
+      else if (!args[i].startsWith("--")) input.push(args[i]);
       else
         throw new Error(
-          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--version <label>] [--team-branch <name> [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build-folder>\nA Linux build needs yougame-native.json beside its program at the top of the zip (publish.md, Desktop builds)."
+          "Usage: node upload-native.mjs --slug <slug> [--entry <path>] [--arch x64|arm64|universal] [--platform windows|linux|macos] [--version <label>] [--team-branch <name> [--note <what it changes>] [--source <source.tar.gz>] [--source-url <repo> --source-commit <hash>]] [--from <earlier build id> | --no-reuse] [--no-manifest] <build.zip | build.tar.gz | build-folder> [more .zip/.tar.gz to merge]\nRelease assets go in as published: a .tar.gz, or several archives (e.g. win64.zip compat-win64.zip), become one zip with every file's bytes and exec bits unchanged.\nA Linux build needs yougame-native.json beside its program at the top of the zip (publish.md, Desktop builds)."
         );
     }
-    if (!input)
+    if (!input.length)
       throw new Error(
-        "Pass a build.zip or folder and --slug. For Unreal, upload a Shipping build."
+        "Pass a build.zip, .tar.gz or folder and --slug. For Unreal, upload a Shipping build."
       );
     const result = await uploadNative(input, options);
     console.log(`${result.id}: ${result.message}`);
@@ -1273,5 +1457,6 @@ export {
   byteSize,
   fileManifest,
   sendInOrder,
+  tarEntries,
   uploadNative
 };
