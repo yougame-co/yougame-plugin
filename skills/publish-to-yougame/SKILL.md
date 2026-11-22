@@ -13,6 +13,9 @@ in the folder.
 Work in this order. Do not skip the check step: it is the difference between a game that
 plays and one that shows a black screen to everyone who clicks it.
 
+`${CLAUDE_PLUGIN_ROOT}` in the commands below is this plugin's own folder, two levels above this
+SKILL.md. When it is not set, as in Codex, put that folder's path in its place.
+
 ## 1. Read the contract
 
 Call the `yougame` MCP tool **`get_publish_guide`**. (No MCP connected? Read
@@ -216,7 +219,7 @@ the creator read https://opengame.io/rules before starting.
 
 If the YouGame MCP connection is signed in (the server asks for it when the MCP connects:
 the creator signs in to YouGame in the browser and presses Allow; in Claude Code that is
-`/mcp` → yougame → Authenticate), or `YOUGAME_API_KEY` is set in the environment (a key the
+`/mcp` → yougame → Authenticate, in Codex `codex mcp login yougame`), or `YOUGAME_API_KEY` is set in the environment (a key the
 creator made at https://yougame.co/account → Your agents → Connect with a key instead), take the submission all the
 way to the creator's final click instead of handing over a zip. Signed in without a key,
 call the `upload_token` tool first: it returns a bearer token good for thirty minutes, and

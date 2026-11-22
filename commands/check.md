@@ -3,7 +3,8 @@ description: Run YouGame's pre-upload checks on a build folder
 argument-hint: "[build folder, e.g. dist]"
 ---
 
-Run YouGame's pre-upload checks on $1 (default: the built game folder in this project).
+Run YouGame's pre-upload checks on the build folder given with this command (if none is given,
+the built game folder in this project).
 
 List every file in that folder with its size, read `index.html` and the `.html`/`.css`/`.js`
 files under 2 MB, and call the `yougame` MCP tool `check_build` with all of it. Show me the

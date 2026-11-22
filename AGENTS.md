@@ -1,7 +1,8 @@
 # Publishing this game on YouGame
 
 Drop this file into a game project to give any agent that reads `AGENTS.md` (Codex and
-friends) the YouGame workflow. Claude Code users get the same thing from the plugin.
+friends) the YouGame workflow. Claude Code and Codex users get the same thing, and more, from
+the plugin (https://github.com/yougame-co/yougame-plugin).
 
 1. Read https://yougame.co/publish.md and follow it: one folder, `index.html` at the top,
    every asset inside it and referenced relatively, nothing that needs a server, key

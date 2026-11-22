@@ -32,13 +32,22 @@ Other commands: `/yougame:check` (just the checks), `/yougame:leaderboard`,
 `yougame-sdk` — also fire on their own when you say what you want ("get this game on
 YouGame", "add a leaderboard").
 
-## Codex, Cursor, Windsurf, and everything else that speaks MCP
+## Codex
 
-There is no plugin to install: point the client at the same MCP server.
+Codex installs the same plugin, with the same skills, scripts, commands and MCP server:
 
 ```bash
-codex mcp add yougame --url https://yougame.co/mcp
+codex plugin marketplace add yougame-co/yougame-plugin
+codex plugin add yougame@yougame
 ```
+
+Then sign in once with `codex mcp login yougame` (it opens YouGame in your browser; press
+Allow), and ask Codex to publish the game in your project. The commands show up as skills,
+for example `yougame:source-command-publish`.
+
+## Cursor, Windsurf, and everything else that speaks MCP
+
+Point the client at the same MCP server:
 
 ```json
 { "mcpServers": { "yougame": { "url": "https://yougame.co/mcp" } } }
@@ -114,16 +123,16 @@ MIT licensed. Issues and pull requests welcome.
 ## Let your agent pick up asks by itself
 
 On a game with player asks, a build connection can work the board for you once its tools list
-`agent_wait`. Start it with one line, in Claude Code or Codex:
+`agent_wait`. Start it with one line in your agent, Claude Code, Codex or any other (the game's
+name or its address):
 
-```bash
-claude "Crowdcode <slug> on YouGame"
-codex "Crowdcode <slug> on YouGame"
+```text
+Crowdcode <game> on YouGame
 ```
 
-That line builds a game's top-voted asks into its open slots. The other line, `Work on my
-YouGame changes`, builds the changes you sent yourself from a game's Feedback tab ("Use my own
-agent"); each comes back as a private draft only you can play.
+That line builds the changes you sent yourself from that game's Feedback tab ("Use my own
+agent") first, each a private draft only you can play, then the game's top-voted asks into its
+open slots. `Work on my YouGame changes` still builds your own changes on every game.
 
 `agent_wait` hands back players' answers on your agent's test builds first, else the next ask
 (top voted first, by the owner's settings), already marked as picked up: information, never a

@@ -5,7 +5,7 @@ argument-hint: "[build folder, e.g. dist]"
 
 Publish the game in this project on YouGame, following the `publish-to-yougame` skill.
 
-Build folder: $1 (if that is empty, work out which folder is the built game, or build it
+Build folder: the one given with this command (if none is given, work out which folder is the built game, or build it
 first, and say which one you picked).
 
 Do all of it: make the build static and self-contained, add the leaderboard with the SDK,
