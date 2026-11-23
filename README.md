@@ -1,14 +1,14 @@
 # YouGame for coding agents
 
-[YouGame](https://yougame.co) hosts browser games. You upload a static build; it is live on
+[YouGame](https://yougame.co) hosts browser games. A static build goes up; it is live on
 its own origin with a leaderboard, a player, and a listing. No review queue, no build step.
 
-This repo is the plugin that teaches your coding agent to get a game onto YouGame: make it
+This repo is the plugin that lets your coding agent get a game onto YouGame for you: make it
 static and self-contained, add the leaderboard where one fits, run the same pre-upload checks
-the upload
-page runs, and hand you a zip that is ready to drop — or, once you have signed in to the
-MCP connection (it asks when it connects), upload it, fill in the whole listing, and hand you
-a review link where you press Publish.
+the upload page runs, and, once you have signed in to the MCP connection (it asks when it
+connects), upload it, fill in the whole listing, publish it, and ship its updates. Ask it for a
+review link instead if you want to look before it goes live. Signed out, it hands you a zip to
+drop on the upload page.
 
 ## Claude Code
 
@@ -73,14 +73,15 @@ project to get the same workflow without asking for it.
 | `get_source` | Clone a public game's source from YouGame git, find its live commit and test builds, and learn how to build and send work back. |
 | `check_build` | The upload page's checks over a folder: `ready`, `risky`, or `broken`, with the reasons. |
 | `search` / `fetch` | One answer out of the docs instead of 40 KB of markdown. |
-| `upload_token` / `prepare_submission` / `my_games` | Signed in: a bearer token for the upload, then fill in the whole listing of a staged build (files streamed through the website’s `/api/upload/*` routes; 5 GB total, up to 512 MB per file) and get the review link; list your games. |
-| `publish_game` / `update_game` | `publish_game` skips the review and refuses unless you explicitly told the agent to publish without reviewing; `update_game` ships a new build of a game that is already up. |
+| `upload_token` / `prepare_submission` / `my_games` | Signed in: a bearer token for the upload (files streamed through the website’s `/api/upload/*` routes; 5 GB total, up to 512 MB per file), a draft of the whole listing with a review link for when you want to look first; list your games. |
+| `publish_game` / `update_game` | Signed in: `publish_game` publishes the game for you when you ask the agent to publish it (`creator_approved`); `update_game` ships a new build of a game that is already up. |
 | Prompts | `make_yougame_ready` and `publish_to_yougame` (one prompt built from what the creator wants: `leaderboard`, `multiplayer` with `players` and `netcode`, `worlds`, `races`, `saves`, `phones` yes/no, and the `paywalls` rows), plus `add_leaderboard`, `add_saves`, `add_paywalls`, `make_playable_on_phones`, `add_controls`, `add_multiplayer`, `add_world`, `add_races` for a game that is already up. |
 
 When the MCP connects it asks you to sign in: run `/mcp` in Claude Code, pick **yougame**,
 and Authenticate; the browser opens YouGame, you press Allow, done. From then on
-`/yougame:publish` finishes with a review link: every field filled in, and the Publish
-button yours. Signed out, it still hands you a zip to drop at https://yougame.co/upload.
+`/yougame:publish` uploads the game, fills in every field, publishes it, and gives you its link
+(say you want to look first and it gives you a review link instead, with the Publish button
+yours). Signed out, it hands you a zip to drop at https://yougame.co/upload instead.
 Prefer a key (curl, CI)? Make one at https://yougame.co/account (Your agents → Connect with a key instead) and
 `export YOUGAME_API_KEY=yg_…` before starting Claude Code for the upload step, and connect
 the MCP with it as the `Authorization: Bearer` header (`claude mcp add --transport http

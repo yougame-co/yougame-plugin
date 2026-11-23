@@ -45,8 +45,9 @@ in the reference before adding anything:
 
 A leaderboard is optional and `"none"` is a normal answer, not a gap.
 
-Three boards, three switches. Whatever the game posts, the creator decides who sees it, on the
-upload form or the game's Manage page: the everyone leaderboard (every player ranked together),
+Three boards, three switches. Whatever the game posts, the creator decides who sees it (you set
+their picks as the `leaderboard`, `friends_board` and `ladder` listing fields when you publish; they
+can also flip them on the upload form or the game's Manage page): the everyone leaderboard (every player ranked together),
 the friends leaderboard (the same scores, each signed-in player seeing only themself and their
 friends), and the ranked ladder (what ranked online matches feed). Any combination is fine, and a
 friends-only board is a normal choice for a game meant to be played among friends. The build is
@@ -352,4 +353,4 @@ of the live SDK reference. Declare categories in root `yougame.json`; use
 The game handles deterministic simulation or state snapshots and ghost rendering. Never
 mix distinct category runs into the default `gameOver` leaderboard.
 
-A game that only runs as a desktop (Windows/macOS/Linux) build sets `platform: desktop_app` and uploads the desktop build from Manage → Desktop builds. Never ship a web page that tells players to download the desktop app: the listing setting shows that to players.
+A game that only runs as a desktop (Windows/macOS/Linux) build sets `platform: desktop_app` and uploads the desktop build once the listing is published: an agent with `native_upload_token` and `upload-native.mjs`, or the owner on Manage → Desktop builds. Never ship a web page that tells players to download the desktop app: the listing setting shows that to players.

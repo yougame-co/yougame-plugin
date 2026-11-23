@@ -36,8 +36,11 @@ the plugin (https://github.com/yougame-co/yougame-plugin).
    `{ "files": [{ "path": "index.html", "size": 1234, "text": "…" }] }` to
    https://yougame.co/api/check-build. These are static checks only; report runtime evidence
    and untested flows separately.
-5. Zip the folder's *contents* (not the folder) and tell the creator the path. They upload
-   it at https://yougame.co/upload; the listing needs a 16:9 thumbnail.
+5. Signed in to the YouGame MCP or with `YOUGAME_API_KEY` set, go to step 6: you upload and
+   publish the game yourself. Only without either, as the fallback, zip the folder's *contents*
+   (not the folder) and tell the creator the path. They upload it at https://yougame.co/upload
+   (the listing needs a 16:9 thumbnail); tell them that connecting the MCP or making a key at
+   https://yougame.co/account (Coding agents) lets you do the whole upload and publish for them.
    If the game has a compile step, build with `node scripts/build-keep.mjs run <project>
    --platform <os>`: it keeps the engine's intermediate folders and a compile cache between
    builds and builds only that one target ("Rebuild only what changed" in publish.md). Export into an empty folder and zip that: never a cache or object files.
@@ -48,20 +51,22 @@ the plugin (https://github.com/yougame-co/yougame-plugin).
    `YOUGAME_API_KEY` set (Node 22+). To change a build you already uploaded, add
    `--from <slug or last uploadId>` so only what changed is sent. Without the plugin download the helper from
    https://yougame.co/upload-build.mjs. It uses the website's streaming routes with the same
-   5 GB total / 512 MB per-file / 5,000-file limits and returns the uploadId and check report.
-   Unzip locally first. A ROM hack is its one .ips/.ups/.bps/.xdelta file, no index.html: pass
+   5 GB total / 512 MB per-file / 5,000-file limits and returns the uploadId and check report. A ROM hack is its one .ips/.ups/.bps/.xdelta file, no index.html: pass
    the file itself and it is staged as a package (kind "patch" on the listing); a mod's folder
    takes `--package`. Then call `prepare_submission` (or POST
    https://yougame.co/api/agent/draft) with every listing field filled in from the game —
    title, description, genres, controls, play mode, phones, mature, max score, paywall prices,
    a thumbnail (from the build, or one you make and PUT to /api/agent/media). Ask the creator
-   about anything the game cannot settle, then give them the review link it returns; they press
-   Publish there. Never call `publish_game` unless they explicitly asked you to skip the review.
+   about anything the game cannot settle. Then publish it: `publish_game` (or POST
+   https://yougame.co/api/agent/publish) with the uploadId and `creator_approved: true`, since
+   the creator asking you to publish is their approval, and give them the game's link. If they
+   want to look first, give them the review link `prepare_submission` returned instead; they press
+   Publish there. Later builds ship with `update_game` whenever they ask.
 
 ## Live verification before submission
 
 Hosted testing is not open yet: until the YouGame MCP lists `start_test_session`, skip this
-section, go on to `prepare_submission`, and say the build was only checked statically.
+section, go on to publishing (step 6), and say the build was only checked statically.
 
 After staging a build, call the YouGame MCP's `start_test_session` with `uploadId`,
 `listing` (at least the title and the intended board/play/phone settings), `players: 2`
@@ -71,7 +76,7 @@ Open each in a separate browser context/profile; tabs alone share login cookies.
 Use actual controls to test desktop and phone play, social interactions and, when present,
 two-player matchmaking, Friends invites, Ready, results, rematches and disconnects.
 Record screenshots/traces and outcomes with `record_test_evidence`, then call `test_report`
-before `prepare_submission`. Static readiness and backend counts do not prove good UX.
+before publishing (or `prepare_submission`). Static readiness and backend counts do not prove good UX.
 Reports are bound to the build files and listing settings; changed builds must be retested.
 Report untested flows honestly (payments and voice are disabled in this test environment).
 Call `close_test_session` when finished; sessions otherwise expire after two hours.
