@@ -1,7 +1,7 @@
 {
   "name": "yougame",
   "displayName": "YouGame",
-  "version": "1.24.15",
+  "version": "1.24.16",
   "description": "Your agent gets the game you are building onto YouGame: the publish rules, the leaderboard SDK and the pre-upload checks, then, signed in, it uploads the build, fills in the listing, publishes it and ships updates (a zip for the upload page without a sign-in).",
   "author": { "name": "YouGame", "url": "https://yougame.co" },
   "homepage": "https://yougame.co/plugin",

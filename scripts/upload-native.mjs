@@ -488,6 +488,7 @@ var EXTERNAL_BUILD_UA_TOKEN = "YouGameExternalBuild/1";
 var HOSTED_ROM_UA_TOKEN = "YouGameHostedRom/1";
 var EXTERNAL_MAC_UA_TOKEN = "YouGameExternalMac/1";
 var OWN_COPY_STAGE_UA_TOKEN = "YouGameOwnCopyStage/1";
+var ROM_STAGE_2_UA_TOKEN = "YouGameRomStage/2";
 var STEAM_BASE_UA_TOKEN = "YouGameSteamBase/1";
 var NATIVE_KNOBS_UA_TOKEN = "YouGameNativeKnobs/1";
 var MULTI_DISC_UA_TOKEN = "YouGameMultiDisc/1";
@@ -495,6 +496,10 @@ var DISC_FILES_UA_TOKEN = "YouGameDiscFiles/1";
 var DISC_FILES_2_UA_TOKEN = "YouGameDiscFiles/2";
 var WRITABLE_COPY_UA_TOKEN = "YouGameWritableCopy/1";
 var PREPARE_UA_TOKEN = "YouGamePrepare/1";
+var STAGE_AT_EXE_UA_TOKEN = "YouGameStageAtExe/1";
+var LAUNCH_ENV_UA_TOKEN = "YouGameLaunchEnv/1";
+var BASE_COPY_UA_TOKEN = "YouGameBaseCopy/1";
+var NETPLAY_KEY_UA_TOKEN = "YouGameNetplayKey/1";
 var MAX_EXTRA_DISCS = 4;
 var DISC_SLOT = /^[a-z][a-z0-9-]{0,15}$/;
 var MAX_DISC_FILES = 256;
@@ -509,6 +514,26 @@ function modPatchSiteOrigins(siteUrl) {
 }
 function stagePath(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 260 && !value.includes("..") && /^[A-Za-z0-9 ._\/-]+$/.test(value) && value.split("/").every((part) => !!part.trim() && part !== "." && !/[. ]$/.test(part) && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
+}
+var ROM_STAGE_EXTENSIONS = {
+  n64: [".z64"],
+  snes: [".sfc"],
+  nds: [".nds"],
+  nes: [".nes"],
+  gb: [".gb"],
+  gbc: [".gbc", ".gb"],
+  gba: [".gba"],
+  genesis: [".md", ".bin", ".gen"],
+  sms: [".sms"],
+  gg: [".gg"]
+};
+var ROM_STAGE_1 = /* @__PURE__ */ new Set([".z64", ".sfc", ".nds"]);
+var ROM_STAGE_ANY = new Set(Object.values(ROM_STAGE_EXTENSIONS).flat());
+function romExt(name) {
+  return name.slice(name.lastIndexOf(".")).toLowerCase();
+}
+function romStageNeeds2(name) {
+  return ROM_STAGE_ANY.has(romExt(name)) && !ROM_STAGE_1.has(romExt(name));
 }
 var MOD_PATCH_MAX_BYTES = 2147483648;
 var SHA256 = /^[a-f0-9]{64}$/;
@@ -558,6 +583,9 @@ function modPatchProblem(raw, siteUrl, userAgent = MOD_AUTHOR_PAGE_UA_TOKEN) {
   return null;
 }
 var PLACEHOLDER = /\{([a-z_]+)(?::([^{}]*))?\}/g;
+var ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+var ENV_RESERVED = /^(PATH|PATHEXT|SYSTEMROOT|SYSTEMDRIVE|WINDIR|COMSPEC|TEMP|TMP|TMPDIR|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|ALLUSERSPROFILE|__COMPAT_LAYER|PROCESSOR_\w*|NUMBER_OF_PROCESSORS|OS|PROGRAMFILES|PROGRAMW6432|COMMONPROGRAMFILES|COMMONPROGRAMW6432|YOUGAME_\w*|SDL_\w*|LD_\w*|DYLD_\w*)$/i;
+var ENV_PLACEHOLDERS = /* @__PURE__ */ new Set(["build", "data", "disc", "rom"]);
 var KNOWN = /* @__PURE__ */ new Set(["build", "data", "disc", "base", "mod_file"]);
 var WINDOW_NAME = /^[A-Za-z0-9 ._:-]{1,64}$/;
 function parseLaunchSpec(text, userAgent = "", siteUrl) {
@@ -570,8 +598,11 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: `${LAUNCH_SPEC_FILE} must be an object` };
   const o = raw;
   const nativeKnobs = userAgent.split(/\s+/).includes(NATIVE_KNOBS_UA_TOKEN);
-  for (const k of Object.keys(o)) if (!["version", "args", "disc", "modPatch", "embed", "controllers", "net", "memoryMb", ...userAgent.split(/\s+/).includes(DIRECT_UA_TOKEN) ? ["direct"] : [], ...userAgent.split(/\s+/).includes(STEAM_BASE_UA_TOKEN) ? ["base", "folders", "children"] : [], ...nativeKnobs ? ["wholeBuild", "appDlls"] : [], ...userAgent.split(/\s+/).includes(WRITABLE_COPY_UA_TOKEN) ? ["writableCopy"] : [], ...userAgent.split(/\s+/).includes(PREPARE_UA_TOKEN) ? ["prepare"] : [], ...userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN) ? ["stage", "derived", "licence"] : userAgent.split(/\s+/).includes(HOSTED_ROM_UA_TOKEN) ? ["stage"] : [], ...userAgent.split(/\s+/).includes(MULTI_DISC_UA_TOKEN) ? ["discs"] : []].includes(k)) return { error: `unknown field "${k}"` };
+  for (const k of Object.keys(o)) if (!["version", "args", "disc", "modPatch", "embed", "controllers", "net", "memoryMb", "netplay_key", "update", ...userAgent.split(/\s+/).includes(DIRECT_UA_TOKEN) ? ["direct"] : [], ...userAgent.split(/\s+/).includes(STEAM_BASE_UA_TOKEN) ? ["base", "folders", "children"] : [], ...nativeKnobs ? ["wholeBuild", "appDlls"] : [], ...userAgent.split(/\s+/).includes(WRITABLE_COPY_UA_TOKEN) ? ["writableCopy"] : [], ...userAgent.split(/\s+/).includes(PREPARE_UA_TOKEN) ? ["prepare"] : [], ...userAgent.split(/\s+/).includes(STAGE_AT_EXE_UA_TOKEN) ? ["stageAt"] : [], ...userAgent.split(/\s+/).includes(LAUNCH_ENV_UA_TOKEN) ? ["env"] : [], ...userAgent.split(/\s+/).includes(BASE_COPY_UA_TOKEN) ? ["baseCopy"] : [], ...userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN) ? ["stage", "derived", "licence"] : userAgent.split(/\s+/).includes(HOSTED_ROM_UA_TOKEN) ? ["stage"] : [], ...userAgent.split(/\s+/).includes(MULTI_DISC_UA_TOKEN) ? ["discs"] : []].includes(k)) return { error: `unknown field "${k}"` };
   if (o.version !== 1) return { error: "version must be 1" };
+  if (o.netplay_key !== void 0 && (typeof o.netplay_key !== "string" || !/^[a-z0-9][a-z0-9._-]{0,39}$/.test(o.netplay_key)))
+    return { error: "netplay_key must be 1 to 40 lowercase letters, digits, '.', '_' or '-'" };
+  if (o.update !== void 0 && o.update !== "required" && o.update !== "optional") return { error: 'update must be "required" or "optional"' };
   const args = o.args ?? [];
   if (!Array.isArray(args) || args.length > 64 || !args.every((a) => typeof a === "string" && a.length <= 1024 && !/[\0\r\n]/.test(a)))
     return { error: "args must be at most 64 strings of at most 1024 characters" };
@@ -629,8 +660,9 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
       const keys = Object.keys(op).sort().join(",");
       if (keys === "rom") {
         if (disc) return { error: 'stage.rom cannot be combined with "disc": true' };
-        if (!stagePath(op.rom) || op.rom.includes("/") || !/\.(z64|sfc|nds)$/.test(op.rom) || ++roms > 1) return { error: "stage.rom must name one .z64, .sfc or .nds file" };
+        if (!stagePath(op.rom) || op.rom.includes("/") || !ROM_STAGE_ANY.has(op.rom.slice(op.rom.lastIndexOf("."))) || ++roms > 1) return { error: "stage.rom must name one cartridge file (.z64, .sfc, .nds, .nes, .gb, .gbc, .gba, .md, .bin, .gen, .sms or .gg)" };
         if (!op.rom.endsWith(".z64") && !userAgent.split(/\s+/).includes(OWN_COPY_STAGE_UA_TOKEN)) return { error: "Update YouGame to play this build." };
+        if (romStageNeeds2(op.rom) && !userAgent.split(/\s+/).includes(ROM_STAGE_2_UA_TOKEN)) return { error: "Update YouGame to play this build." };
       } else if (keys === "disc") {
         if (!userAgent.split(/\s+/).includes(OWN_COPY_STAGE_UA_TOKEN)) return { error: "Update YouGame to play this build." };
         if (!userAgent.split(/\s+/).includes(EXTERNAL_BUILD_UA_TOKEN)) return { error: "stage.disc is external-only" };
@@ -684,6 +716,36 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (o.appDlls !== void 0 && o.appDlls !== true) return { error: "appDlls must be true" };
   if (o.writableCopy !== void 0 && o.writableCopy !== true) return { error: "writableCopy must be true" };
   if (o.writableCopy === true && o.children !== void 0) return { error: "writableCopy cannot be used with children" };
+  if (o.baseCopy !== void 0 && o.baseCopy !== true) return { error: "baseCopy must be true" };
+  if (o.baseCopy === true && o.writableCopy !== true) return { error: "baseCopy needs writableCopy" };
+  if (o.baseCopy === true && !base) return { error: "baseCopy needs base" };
+  if (o.stageAt !== void 0) {
+    if (o.stageAt !== "exe") return { error: 'stageAt must be "exe"' };
+    if (o.writableCopy !== true) return { error: "stageAt needs writableCopy" };
+    const ops = Array.isArray(o.stage) ? o.stage : [];
+    if (!ops.length || !ops.every((op) => op && typeof op === "object" && ("rom" in op || "disc" in op)))
+      return { error: "stageAt needs a stage of only rom or disc steps" };
+  }
+  let env;
+  if (o.env !== void 0) {
+    const e = o.env;
+    if (!e || typeof e !== "object" || Array.isArray(e) || Object.keys(e).length > 32) return { error: "env must map at most 32 names to strings" };
+    const romStep = Array.isArray(o.stage) && o.stage.some((op) => op && typeof op === "object" && typeof op.rom === "string");
+    const seen = /* @__PURE__ */ new Set();
+    env = {};
+    for (const [k, v] of Object.entries(e)) {
+      if (!ENV_NAME.test(k) || ENV_RESERVED.test(k) || seen.has(k.toUpperCase())) return { error: `env name "${k}" is not allowed` };
+      seen.add(k.toUpperCase());
+      if (typeof v !== "string" || v.length > 1024 || /[\0\r\n]/.test(v)) return { error: `env.${k} must be a string of at most 1024 characters` };
+      for (const m of v.matchAll(PLACEHOLDER)) {
+        if (m[2] !== void 0 || !ENV_PLACEHOLDERS.has(m[1])) return { error: `env.${k}: unknown placeholder ${m[0]}` };
+        if (m[1] === "disc" && !disc) return { error: `env.${k}: {disc} needs "disc": true` };
+        if (m[1] === "rom" && !romStep) return { error: `env.${k}: {rom} needs a stage rom step` };
+      }
+      if (v.replace(PLACEHOLDER, "").includes("{")) return { error: `stray "{" in env.${k}` };
+      env[k] = v;
+    }
+  }
   let prepare;
   if (o.prepare !== void 0) {
     if (o.writableCopy !== true) return { error: "prepare needs writableCopy" };
@@ -717,9 +779,9 @@ function parseLaunchSpec(text, userAgent = "", siteUrl) {
   if (o.direct === true && o.net !== "yougame") return { error: 'direct needs net "yougame"' };
   const memoryMb = o.memoryMb === void 0 ? 4096 : o.memoryMb;
   if (typeof memoryMb !== "number" || !Number.isInteger(memoryMb) || memoryMb < 512 || memoryMb > 16384) return { error: "memoryMb must be a whole number from 512 to 16384" };
-  return { spec: { args, disc, ...o.derived !== void 0 ? { derived: o.derived } : {}, ...o.licence !== void 0 ? { licence: o.licence } : {}, ...o.stage !== void 0 ? { stage: o.stage } : {}, ...o.modPatch !== void 0 ? { modPatch: o.modPatch } : {}, base, ...o.folders !== void 0 ? { folders: o.folders } : {}, ...o.children !== void 0 ? { children: o.children } : {}, ...o.wholeBuild === true ? { wholeBuild: true } : {}, ...o.appDlls === true ? { appDlls: true } : {}, ...o.writableCopy === true ? { writableCopy: true } : {}, ...prepare ? { prepare } : {}, embed, controllers: o.controllers === "mirror" ? "mirror" : "none", net: o.net === "internet" || o.net === "yougame" ? o.net : "none", ...o.direct === true ? { direct: true } : {}, memoryMb, ...discs && Object.keys(discs).length ? { discs } : {}, ...discFileLists ? { discFileLists } : {} } };
+  return { spec: { args, disc, ...o.netplay_key !== void 0 || o.update !== void 0 ? { netplayMeta: true } : {}, ...o.derived !== void 0 ? { derived: o.derived } : {}, ...o.licence !== void 0 ? { licence: o.licence } : {}, ...o.stage !== void 0 ? { stage: o.stage } : {}, ...o.modPatch !== void 0 ? { modPatch: o.modPatch } : {}, base, ...o.folders !== void 0 ? { folders: o.folders } : {}, ...o.children !== void 0 ? { children: o.children } : {}, ...o.wholeBuild === true ? { wholeBuild: true } : {}, ...o.appDlls === true ? { appDlls: true } : {}, ...o.writableCopy === true ? { writableCopy: true } : {}, ...o.baseCopy === true ? { baseCopy: true } : {}, ...prepare ? { prepare } : {}, ...o.stageAt === "exe" ? { stageAt: "exe" } : {}, ...env ? { env } : {}, embed, controllers: o.controllers === "mirror" ? "mirror" : "none", net: o.net === "internet" || o.net === "yougame" ? o.net : "none", ...o.direct === true ? { direct: true } : {}, memoryMb, ...discs && Object.keys(discs).length ? { discs } : {}, ...discFileLists ? { discFileLists } : {} } };
 }
-var APP_PARSE_TOKENS = `${DIRECT_UA_TOKEN} ${STEAM_BASE_UA_TOKEN} ${NATIVE_KNOBS_UA_TOKEN} ${MOD_PATCH_7Z_UA_TOKEN} ${MOD_AUTHOR_PAGE_UA_TOKEN} ${EXTERNAL_BUILD_UA_TOKEN} ${EXTERNAL_MAC_UA_TOKEN} ${MULTI_DISC_UA_TOKEN} ${HOSTED_ROM_UA_TOKEN} ${DISC_FILES_UA_TOKEN} ${DISC_FILES_2_UA_TOKEN} ${OWN_COPY_STAGE_UA_TOKEN} ${WRITABLE_COPY_UA_TOKEN} ${PREPARE_UA_TOKEN}`;
+var APP_PARSE_TOKENS = `${DIRECT_UA_TOKEN} ${STEAM_BASE_UA_TOKEN} ${NATIVE_KNOBS_UA_TOKEN} ${MOD_PATCH_7Z_UA_TOKEN} ${MOD_AUTHOR_PAGE_UA_TOKEN} ${EXTERNAL_BUILD_UA_TOKEN} ${EXTERNAL_MAC_UA_TOKEN} ${MULTI_DISC_UA_TOKEN} ${HOSTED_ROM_UA_TOKEN} ${DISC_FILES_UA_TOKEN} ${DISC_FILES_2_UA_TOKEN} ${OWN_COPY_STAGE_UA_TOKEN} ${ROM_STAGE_2_UA_TOKEN} ${WRITABLE_COPY_UA_TOKEN} ${PREPARE_UA_TOKEN} ${STAGE_AT_EXE_UA_TOKEN} ${LAUNCH_ENV_UA_TOKEN} ${BASE_COPY_UA_TOKEN} ${NETPLAY_KEY_UA_TOKEN}`;
 
 // src/lib/native-spec-check.ts
 function specNameFor(entry) {
@@ -1500,7 +1562,7 @@ ${note.trim()}`.slice(0, 2e3) : carried;
       ...noReuse ? { noReuse } : {},
       ...parity ? { parity } : {},
       ...carried ? { specCarried: carried } : {},
-      message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : result.build?.state === "ready" ? `the listing's own build${v}: live now${result.auto_live ? " (a GitHub release of a repo its owner linked goes live by itself)" : ""}` : `the listing's own build${v}: waiting to go live. Your agent's make_native_live {slug} makes it live, or Make it live on Manage \u2192 Desktop builds`
+      message: teamBranch !== void 0 ? `ready as the test build "${teamBranch.trim()}"${v}, not the listing's build${who}` : start.requestBranch === true ? start.requestVisible === false ? `uploaded as a test build${v}, but players can't see it yet: this listing shows test builds only with Alpha on, and its owner can turn that on in Manage. The live game doesn't change` : `ready as a test build${v}: signed-in players can try it now. The live game doesn't change until its owner accepts it` : result.build?.state === "ready" ? `the listing's own build${v}: live now${result.auto_live ? " (a GitHub release of a repo its owner linked goes live by itself)" : ""}` : `the listing's own build${v}: ready to go live. Make it live with the make_native_live tool (YouGame MCP), or on Manage \u2192 Desktop builds`
     };
     Object.defineProperty(done, "summary", { value: summary });
     return done;

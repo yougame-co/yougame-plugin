@@ -11,7 +11,7 @@
       "source": "./",
       "displayName": "YouGame",
       "description": "Publish browser games on YouGame: the build contract, the leaderboard SDK, the pre-upload checks, then your agent uploads, lists and publishes the game for you.",
-      "version": "1.24.15",
+      "version": "1.24.16",
       "author": {
         "name": "YouGame",
         "url": "https://yougame.co"

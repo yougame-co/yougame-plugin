@@ -310,6 +310,18 @@ only after `hello`'s result shows `netBroker`. For C or C++ use the single heade
 `https://yougame.co/native/yougame_net.h`; follow sdk.md "Going online through YouGame" (limits,
 the queue's `matched` step, and what is not available: engine servers and direct links).
 
+**Shipping updates to an online native game smoothly** (several hotfixes a day included) is the agent's job, in four
+parts (publish.md "Ship updates smoothly" has the detail). 1) Release from GitHub: link the repo on Manage → GitHub,
+and each published release, with a `.zip` per OS and its `yougame-native.json` inside, becomes the listing's Latest
+test build within minutes, or about 90 s with the release-notice workflow; the owner promotes it, or turns on
+"Promote each new release automatically". 2) Set `"netplay_key"` in `yougame-native.json` and own it: keep it while a
+release still plays the last one, and change it together with `"update": "required"` when sync breaks. Check which it
+is by running the old and new builds in a hidden match on identical inputs and comparing a per-frame state checksum.
+Without a key, only the exact same build meets online, so every release splits players. 3) A required update never
+stops a running match: older copies are refused at their next online match and offered the update. Optional updates
+change nothing for players already playing. 4) Never tie an online mode, lobby or compatibility string to one build
+id, version or hash; `netplay_key` is the one place that says which builds play together.
+
 **Saves are the step a native build must not skip.** Nothing on the platform can see a native
 game's save folder, so the program syncs its own files with the bridge's `saveFile*` messages,
 following sdk.md "Saves from a native build" exactly: at start `saveFileList`, then per file the
